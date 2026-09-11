@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # configure-ai-engine-inside-lxc.sh (vLLM variant)
-# Version: 0.1.1
+# Version: 0.1.2
 # Description: Bootstrap vLLM + Open WebUI on Ubuntu 24.04 LXC with ROCm passthrough (gfx1150)
 # Target GPU: AMD Radeon 890M (gfx1150/Strix Halo) on Proxmox 9.x privileged LXC — mirrors hlh-ai-engine 113/192.168.1.13
 # Requirements: Run as root inside privileged LXC with GPU passthrough (/dev/dri/card1, renderD129, /dev/kfd) and /srv/ai/models bind mount
 # Changelog:
-#   0.1.1 - Default model now shared GGUF /srv/ai/models/Qwen3.6-35B-A3B-MTP-Q4_K_M.gguf (same as hlh-ai-engine 112, 98304 ctx) — added hf-cache check, VLLM_LOGGING_LEVEL=DEBUG, pre-check rocm-smi
+#   0.1.2 - Fix vLLM bootstrap: HF Qwen2.5-7B (not GGUF qwen35moe which 0.6.6 cannot load), GFX 11.0.0 override (11.5.0 gives HIP invalid device), ld.so.conf for libamd_smi, amdsmi 27.0.0
+#   0.1.1 - Default model now shared GGUF /srv/ai/models/Qwen3.6-35B-A3B-MTP-Q4_K_M.gguf (same as hlh-ai-engine 112, 98304 ctx) — added hf-cache check, VLLM_LOGGING_LEVEL=DEBUG, pre-check rocm-smi (reverted: GGUF not supported by vLLM 0.6.6)
 #   0.1.0 - Initial vLLM variant forked from hlh-ai-engine v0.9.4
 #           ROCm 10.0.0 default never pinned (ROCM_VERSION env, 7.14.1 rollback supported)
 #           Replaces llama.cpp HIP+Vulkan dual build with vLLM ROCm (pip) + Open WebUI (docker)
@@ -15,15 +16,15 @@ set -euo pipefail
 
 # --- CONFIGURABLE ---
 MODEL_DIR="/srv/ai/models"
-# Shared model with hlh-ai-engine (112) — user confirmed: /srv/ai/models/Qwen3.6-35B-A3B-MTP-Q4_K_M.gguf
-# vLLM 0.8+ has experimental GGUF support (llama.cpp GGUF via vLLM); HF safetensors also supported via HF ID.
-# Keep this path as default so 112 and 113 serve the same weights without duplication.
-DEFAULT_MODEL_HF="/srv/ai/models/Qwen3.6-35B-A3B-MTP-Q4_K_M.gguf"
-DEFAULT_MODEL_NAME="qwen3.6-35b-a3b-mtp-q4_k_m"
+# vLLM on 0.6.6 cannot load GGUF Qwen3.6-35B-A3B-MTP (qwen35moe) — "ValueError: GGUF model with architecture qwen35moe is not supported yet."
+# That GGUF is for hlh-ai-engine 112 (llama.cpp) sibling. For vLLM, default to HF safetensors that vLLM 0.6.6 + transformers 4.45.2 supports.
+# HF cache is at /srv/ai/models/.hf-cache (shared). To serve the same 35B family on vLLM when supported, switch to Qwen/Qwen3-30B-A3B via vllm-switch-model.sh.
+DEFAULT_MODEL_HF="Qwen/Qwen2.5-7B-Instruct"
+DEFAULT_MODEL_NAME="qwen2.5-7b"
 VENV_DIR="/opt/vllm-venv"
 ROCM_PATH="/opt/rocm"
 ROCM_VERSION="${ROCM_VERSION:-10.0.0}"
-GFX_VERSION="11.5.0"   # gfx1150 native — HSA_OVERRIDE for ROCm
+GFX_VERSION="11.0.0"   # gfx1150 via HSA_OVERRIDE 11.0.0 for torch ROCm 6.2 (11.5.0 gave HIP invalid device function with 2.5.1+rocm6.2)
 VLLM_PORT="8000"
 WEBUI_PORT="8080"
 VLLM_SERVICE="/etc/systemd/system/vllm.service"
