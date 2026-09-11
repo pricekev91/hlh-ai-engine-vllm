@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # configure-ai-engine-inside-lxc.sh (vLLM variant)
-# Version: 0.1.0
+# Version: 0.1.1
 # Description: Bootstrap vLLM + Open WebUI on Ubuntu 24.04 LXC with ROCm passthrough (gfx1150)
 # Target GPU: AMD Radeon 890M (gfx1150/Strix Halo) on Proxmox 9.x privileged LXC — mirrors hlh-ai-engine 113/192.168.1.13
 # Requirements: Run as root inside privileged LXC with GPU passthrough (/dev/dri/card1, renderD129, /dev/kfd) and /srv/ai/models bind mount
 # Changelog:
+#   0.1.1 - Default model now shared GGUF /srv/ai/models/Qwen3.6-35B-A3B-MTP-Q4_K_M.gguf (same as hlh-ai-engine 112, 98304 ctx) — added hf-cache check, VLLM_LOGGING_LEVEL=DEBUG, pre-check rocm-smi
 #   0.1.0 - Initial vLLM variant forked from hlh-ai-engine v0.9.4
 #           ROCm 10.0.0 default never pinned (ROCM_VERSION env, 7.14.1 rollback supported)
 #           Replaces llama.cpp HIP+Vulkan dual build with vLLM ROCm (pip) + Open WebUI (docker)
@@ -14,9 +15,11 @@ set -euo pipefail
 
 # --- CONFIGURABLE ---
 MODEL_DIR="/srv/ai/models"
-# vLLM default: HF safetensors (not GGUF). GGUF models in /srv/ai/models are ignored by vLLM; HF will be downloaded on first serve if missing.
-DEFAULT_MODEL_HF="Qwen/Qwen2.5-Coder-32B-Instruct"  # small enough for 48G VRAM test; override via model switch
-DEFAULT_MODEL_NAME="qwen2.5-coder-32b"
+# Shared model with hlh-ai-engine (112) — user confirmed: /srv/ai/models/Qwen3.6-35B-A3B-MTP-Q4_K_M.gguf
+# vLLM 0.8+ has experimental GGUF support (llama.cpp GGUF via vLLM); HF safetensors also supported via HF ID.
+# Keep this path as default so 112 and 113 serve the same weights without duplication.
+DEFAULT_MODEL_HF="/srv/ai/models/Qwen3.6-35B-A3B-MTP-Q4_K_M.gguf"
+DEFAULT_MODEL_NAME="qwen3.6-35b-a3b-mtp-q4_k_m"
 VENV_DIR="/opt/vllm-venv"
 ROCM_PATH="/opt/rocm"
 ROCM_VERSION="${ROCM_VERSION:-10.0.0}"
@@ -119,24 +122,42 @@ source "${VENV_DIR}/bin/activate"
 pip install --upgrade pip wheel setuptools 2>&1 | tail -20
 
 # vLLM ROCm install: use stable ROCm wheels. gfx1150 (APU) is community-tier; try official pip first, fallback to ROCm extra-index.
-# Official vLLM CPU wheel will be replaced by ROCm build if available.
+# Host is trixie debian13 with ROCm 10.0 stable; LXC is ubuntu2404. Need torch+ROCm matching host driver (10.0) or vLLM falls back to CPU and fails "Failed to infer device type".
 echo "[2/6] Installing vLLM (this can take 10-20 minutes)..."
-# Attempt 1: ROCm-indexed build (if available)
+# quick device check before pip
+echo "[2/6] Pre-check: rocm-smi + hip + /dev/kfd"
+rocm-smi 2>&1 | head -30 || echo "WARNING: rocm-smi no GPUs (host/LXC ROCm mismatch?)"
+rocminfo 2>&1 | head -30 || true
+ls -l /dev/kfd /dev/dri/card1 /dev/dri/renderD129 2>&1 | head -10 || true
+# Install torch ROCm first so vLLM picks ROCm torch, not CUDA/CPU
+pip install --extra-index-url https://download.pytorch.org/whl/rocm6.2 torch torchvision --upgrade 2>&1 | tail -30 || \
+  pip install --index-url https://download.pytorch.org/whl/rocm6.2 torch torchvision --upgrade 2>&1 | tail -30 || true
+# Attempt 1: ROCm-indexed vLLM build
 pip install --extra-index-url https://download.pytorch.org/whl/rocm6.2 "vllm[rocm]" 2>&1 | tail -50 || true
-# Attempt 2: generic vllm (will pull CPU/CUDA but still allow --help)
+# Attempt 2: generic vllm (will pull CPU/CUDA but still allow --help) — will fail device detection on ROCm-only host
 if ! "${VENV_DIR}/bin/python" -c "import vllm; print(vllm.__version__)" 2>&1 | head -5; then
   echo "Retrying generic vllm install..."
   pip install vllm 2>&1 | tail -50 || true
 fi
 "${VENV_DIR}/bin/python" -c "import vllm; print('vLLM', vllm.__version__)" 2>&1 | head -5 || echo "WARNING: vLLM import failed — may need ROCm-specific wheel"
+# Debug device inference right after install
+VLLM_LOGGING_LEVEL=DEBUG "${VENV_DIR}/bin/python" -c "from vllm.config.device import DeviceConfig; import os; os.environ['HSA_OVERRIDE_GFX_VERSION']='11.5.0'; print('Device check:', DeviceConfig(device='cuda'))" 2>&1 | head -100 || true
 deactivate
 
 # --- 3. MODEL DIR ---
 echo "[3/6] Setting up model directory ${MODEL_DIR}..."
 mkdir -p "${MODEL_DIR}"
-# Keep GGUF models for llama sibling; vLLM will use HF cache under /root/.cache/huggingface or --download-dir
-# Ensure Hugging Face cache points to /srv/ai/models/hf if desired
+# Shared GGUF: ensure the default GGUF exists (it is the hlh-ai-engine 112 model). vLLM can load this GGUF directly (experimental)
+# and will also use HF cache for safetensors models. Keep both paths.
 mkdir -p /root/.cache/huggingface 2>&1 || true
+mkdir -p "${MODEL_DIR}/.hf-cache" 2>&1 || true
+if [ -f "${DEFAULT_MODEL_HF}" ]; then
+  echo "Default GGUF present: ${DEFAULT_MODEL_HF} ($(du -h "${DEFAULT_MODEL_HF}" 2>&1 | awk '{print $1}'))"
+else
+  echo "WARNING: Default model ${DEFAULT_MODEL_HF} not found on ${MODEL_DIR} — vLLM will fail to start until model is present."
+  echo "Available .gguf in ${MODEL_DIR}:"
+  ls -lh "${MODEL_DIR}"/*.gguf 2>&1 | head -20 || true
+fi
 # Create a helper for HF download (mirrors dl.sh but for HF)
 cat > "${MODEL_DIR}/dl-hf.sh" << 'EOS'
 #!/usr/bin/env bash
@@ -174,7 +195,9 @@ Environment=LD_LIBRARY_PATH=${ROCM_PATH}/lib:${ROCM_PATH}/lib64:/usr/local/lib
 Environment=PATH=${VENV_DIR}/bin:${ROCM_PATH}/bin:${ROCM_PATH}/llvm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=HF_HUB_CACHE=/srv/ai/models/.hf-cache
 Environment=HF_HOME=/srv/ai/models/.hf-cache
-ExecStart=${VENV_DIR}/bin/python -m vllm.entrypoints.openai.api_server --model ${DEFAULT_MODEL_HF} --host 0.0.0.0 --port ${VLLM_PORT} --served-model-name ${DEFAULT_MODEL_NAME} --gpu-memory-utilization 0.85 --max-model-len 8192 --enforce-eager --dtype half
+Environment=VLLM_LOGGING_LEVEL=DEBUG
+# vLLM on gfx1150 APU: enforce_eager needed, dtype auto for GGUF. Override device if ROCm detection fails: set VLLM_TARGET_DEVICE=cuda (HIP maps to cuda)
+ExecStart=${VENV_DIR}/bin/python -m vllm.entrypoints.openai.api_server --model ${DEFAULT_MODEL_HF} --host 0.0.0.0 --port ${VLLM_PORT} --served-model-name ${DEFAULT_MODEL_NAME} --gpu-memory-utilization 0.85 --max-model-len 98304 --enforce-eager --dtype auto --trust-remote-code
 Restart=on-failure
 RestartSec=10
 User=root
