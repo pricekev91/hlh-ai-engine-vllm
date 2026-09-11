@@ -256,20 +256,19 @@ echo "[3/6] Adding GPU/ROCm passthrough devices..."
 # KFD is shared (511:0) but ROCm only sees GPUs that have a visible renderD.
 cat >> "/etc/pve/lxc/${LXC_ID}.conf" <<'LXCCONF'
 
-# GPU passthrough - 890M iGPU only (gfx1150/Strix Halo)
-# RX 480 eGPU (gfx803) excluded: ROCm 7.x drops gfx803 and errors out
-# when it appears as GPU 0, preventing the 890M from ever being reached.
-# cgroup allow: only card1 (226:1) and renderD129 (226:129)
-lxc.cgroup2.devices.allow: c 226:1 rwm
-lxc.cgroup2.devices.allow: c 226:129 rwm
+# GPU passthrough - 890M iGPU only (gfx1150/Strix Halo, 0000:c9:00.0)
+# card0 (226:0) + renderD128 (226:128) is the 890M (1002:150e); card1/2 + renderD129/130 are Tesla K80s (10de:102d) via OCuLink — intentionally NOT passed.
+# Earlier configs used card1/renderD129 when K80 was not enumerated as card0; on current host (trixie, 7.0.14-11-pve) 890M is card0.
+lxc.cgroup2.devices.allow: c 226:0 rwm
+lxc.cgroup2.devices.allow: c 226:128 rwm
 lxc.cgroup2.devices.allow: c 511:0 rwm
 # Mount only the 890M nodes; /dev/dri is created automatically by LXC.
 # NOTE: Do NOT use 'lxc.mount.entry: none dev/dri ...' — on Proxmox 9.x that
 # incorrectly mounts the host root (rpool/ROOT/pve-1) onto /dev/dri inside the
 # container (seen as rpool/ROOT/pve-1 /dev/dri zfs in /proc/mounts), breaking
 # DRM and causing rocminfo 'Invalid argument' and rocm-smi 'No GPUs'.
-lxc.mount.entry: /dev/dri/card1 dev/dri/card1 none bind,optional,create=file
-lxc.mount.entry: /dev/dri/renderD129 dev/dri/renderD129 none bind,optional,create=file
+lxc.mount.entry: /dev/dri/card0 dev/dri/card0 none bind,optional,create=file
+lxc.mount.entry: /dev/dri/renderD128 dev/dri/renderD128 none bind,optional,create=file
 lxc.mount.entry: /dev/kfd dev/kfd none bind,optional,create=file
 LXCCONF
 
