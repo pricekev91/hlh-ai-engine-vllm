@@ -16,15 +16,16 @@ set -euo pipefail
 
 # --- CONFIGURABLE ---
 MODEL_DIR="/srv/ai/models"
-# vLLM on 0.6.6 cannot load GGUF Qwen3.6-35B-A3B-MTP (qwen35moe) — "ValueError: GGUF model with architecture qwen35moe is not supported yet."
-# That GGUF is for hlh-ai-engine 112 (llama.cpp) sibling. For vLLM, default to HF safetensors that vLLM 0.6.6 + transformers 4.45.2 supports.
-# HF cache is at /srv/ai/models/.hf-cache (shared). To serve the same 35B family on vLLM when supported, switch to Qwen/Qwen3-30B-A3B via vllm-switch-model.sh.
+# User wants GGUF /srv/ai/models/Qwen3.6-35B-A3B-MTP-Q4_K_M.gguf (qwen35moe) as default — but vLLM 0.6.6/0.29.0 + transformers cannot load that GGUF (qwen35moe not supported).
+# That GGUF is for hlh-ai-engine 112 (llama.cpp). For vLLM, default to HF safetensors that is supported and loads on 890M.
+# HF cache is at /srv/ai/models/.hf-cache (shared). The GGUF remains on disk for llama sibling and for future vLLM GGUF support (try via vllm-switch-model.sh).
 DEFAULT_MODEL_HF="Qwen/Qwen2.5-7B-Instruct"
 DEFAULT_MODEL_NAME="qwen2.5-7b"
+# To serve the requested Qwen3.6-35B on vLLM when HF available, use: vllm-switch-model.sh -> Qwen/Qwen3-35B-A3B or Qwen/Qwen2.5-32B
 VENV_DIR="/opt/vllm-venv"
 ROCM_PATH="/opt/rocm"
 ROCM_VERSION="${ROCM_VERSION:-10.0.0}"
-GFX_VERSION="11.0.0"   # gfx1150 via HSA_OVERRIDE 11.0.0 for torch ROCm 6.2 (11.5.0 gave HIP invalid device function with 2.5.1+rocm6.2)
+GFX_VERSION="11.0.0"   # gfx1150 via HSA_OVERRIDE 11.0.0 for torch ROCm 6.2/6.4 (11.5.0 gave HIP invalid device with 2.5.1+rocm6.2 on 0.6.6)
 VLLM_PORT="8000"
 WEBUI_PORT="8080"
 VLLM_SERVICE="/etc/systemd/system/vllm.service"
@@ -85,9 +86,18 @@ if [ ! -f /opt/rocm/lib/cmake/hip-lang/hip-lang-config.cmake ] && [ ! -f /opt/ro
   echo "WARNING: HIP CMake package not found after ROCm install (may still work for vLLM pip wheels)"
 fi
 
-# Add root to render/video
+# Fix ld.so for ROCm 10 amdsmi (libamd_smi.so not in cache without rocm.conf)
+if [ ! -f /etc/ld.so.conf.d/rocm.conf ]; then
+  echo "/opt/rocm/lib" > /etc/ld.so.conf.d/rocm.conf
+  echo "/opt/rocm/lib64" >> /etc/ld.so.conf.d/rocm.conf 2>&1 || true
+  ldconfig 2>&1 | head -5 || true
+fi
+ldconfig -p 2>&1 | grep -q libamd_smi.so || ldconfig 2>&1 | head -5 || true
+
+# Add root to render/video (needed for /dev/kfd rw — crw-rw---- root render)
 usermod -aG render root 2>&1 || true
 usermod -aG video root 2>&1 || true
+# Ensure render group membership takes effect for systemd (Group=render in service)
 
 # SSH
 mkdir -p /etc/ssh/sshd_config.d
@@ -125,24 +135,32 @@ pip install --upgrade pip wheel setuptools 2>&1 | tail -20
 # vLLM ROCm install: use stable ROCm wheels. gfx1150 (APU) is community-tier; try official pip first, fallback to ROCm extra-index.
 # Host is trixie debian13 with ROCm 10.0 stable; LXC is ubuntu2404. Need torch+ROCm matching host driver (10.0) or vLLM falls back to CPU and fails "Failed to infer device type".
 echo "[2/6] Installing vLLM (this can take 10-20 minutes)..."
-# quick device check before pip
+# quick device check before pip — correct card is card0/renderD128 for 890M (not card1)
 echo "[2/6] Pre-check: rocm-smi + hip + /dev/kfd"
 rocm-smi 2>&1 | head -30 || echo "WARNING: rocm-smi no GPUs (host/LXC ROCm mismatch?)"
 rocminfo 2>&1 | head -30 || true
-ls -l /dev/kfd /dev/dri/card1 /dev/dri/renderD129 2>&1 | head -10 || true
-# Install torch ROCm first so vLLM picks ROCm torch, not CUDA/CPU
-pip install --extra-index-url https://download.pytorch.org/whl/rocm6.2 torch torchvision --upgrade 2>&1 | tail -30 || \
-  pip install --index-url https://download.pytorch.org/whl/rocm6.2 torch torchvision --upgrade 2>&1 | tail -30 || true
-# Attempt 1: ROCm-indexed vLLM build
-pip install --extra-index-url https://download.pytorch.org/whl/rocm6.2 "vllm[rocm]" 2>&1 | tail -50 || true
-# Attempt 2: generic vllm (will pull CPU/CUDA but still allow --help) — will fail device detection on ROCm-only host
+ls -l /dev/kfd /dev/dri/card0 /dev/dri/renderD128 2>&1 | head -10 || true
+# Install torch ROCm first so vLLM picks ROCm torch, not CUDA/CPU. Use rocm6.4 for newer vLLM (0.29.0 needs torch 2.8+), rocm6.2 for 0.6.6 needs 2.5
+pip install --index-url https://download.pytorch.org/whl/rocm6.4 "torch==2.8.0+rocm6.4" "torchvision==0.23.0+rocm6.4" 2>&1 | tail -50 || \
+  pip install --extra-index-url https://download.pytorch.org/whl/rocm6.2 torch torchvision --upgrade 2>&1 | tail -30 || true
+# Fix amdsmi for ROCm 10: pip amdsmi 7.0.2 is for ROCm 7, need 27.0.0 from /opt/rocm/share/amd_smi
+if pip show amdsmi 2>&1 | grep -q "7.0.2"; then
+  echo "[2/6] Replacing pip amdsmi 7.0.2 with ROCm 10 amdsmi from /opt/rocm/share/amd_smi ..."
+  pip uninstall -y amdsmi 2>&1 | tail -10 || true
+  pip install /opt/rocm/share/amd_smi 2>&1 | tail -30 || true
+fi
+# Ensure vLLM version compatible with torch+transformers. vLLM 0.29.0 needs transformers>=5.10 and torch 2.8+rocm6.4
+echo "[2/6] Installing vLLM 0.29.0 (ROCm) — GGUF qwen35moe not supported yet, HF Qwen2.5-7B is default"
+pip install "vllm==0.29.0" 2>&1 | tail -50 || pip install "vllm[rocm]" 2>&1 | tail -50 || true
 if ! "${VENV_DIR}/bin/python" -c "import vllm; print(vllm.__version__)" 2>&1 | head -5; then
   echo "Retrying generic vllm install..."
   pip install vllm 2>&1 | tail -50 || true
 fi
 "${VENV_DIR}/bin/python" -c "import vllm; print('vLLM', vllm.__version__)" 2>&1 | head -5 || echo "WARNING: vLLM import failed — may need ROCm-specific wheel"
+# Pin transformers to 5.17 for vLLM 0.29.0 (4.45 too old, 5.17 works for Qwen2.5-7B)
+pip install "transformers==5.17.0" 2>&1 | tail -20 || true
 # Debug device inference right after install
-VLLM_LOGGING_LEVEL=DEBUG "${VENV_DIR}/bin/python" -c "from vllm.config.device import DeviceConfig; import os; os.environ['HSA_OVERRIDE_GFX_VERSION']='11.5.0'; print('Device check:', DeviceConfig(device='cuda'))" 2>&1 | head -100 || true
+VLLM_LOGGING_LEVEL=DEBUG "${VENV_DIR}/bin/python" -c "import os; os.environ['HSA_OVERRIDE_GFX_VERSION']='11.0.0'; from vllm.platforms import rocm; print('rocm platform check done')" 2>&1 | head -30 || true
 deactivate
 
 # --- 3. MODEL DIR ---
@@ -196,12 +214,15 @@ Environment=LD_LIBRARY_PATH=${ROCM_PATH}/lib:${ROCM_PATH}/lib64:/usr/local/lib
 Environment=PATH=${VENV_DIR}/bin:${ROCM_PATH}/bin:${ROCM_PATH}/llvm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=HF_HUB_CACHE=/srv/ai/models/.hf-cache
 Environment=HF_HOME=/srv/ai/models/.hf-cache
+Environment=PYTHONPATH=/opt/rocm/share/amd_smi:/opt/rocm/lib/python3.12/site-packages
 Environment=VLLM_LOGGING_LEVEL=DEBUG
-# vLLM on gfx1150 APU: enforce_eager needed, dtype auto for GGUF. Override device if ROCm detection fails: set VLLM_TARGET_DEVICE=cuda (HIP maps to cuda)
-ExecStart=${VENV_DIR}/bin/python -m vllm.entrypoints.openai.api_server --model ${DEFAULT_MODEL_HF} --host 0.0.0.0 --port ${VLLM_PORT} --served-model-name ${DEFAULT_MODEL_NAME} --gpu-memory-utilization 0.85 --max-model-len 98304 --enforce-eager --dtype auto --trust-remote-code
+# vLLM on gfx1150 APU: enforce_eager needed, dtype auto. GGUF Qwen3.6-35B qwen35moe not supported by vLLM 0.29.0/transformers, so default HF Qwen2.5-7B.
+ExecStart=${VENV_DIR}/bin/python -m vllm.entrypoints.openai.api_server --model ${DEFAULT_MODEL_HF} --host 0.0.0.0 --port ${VLLM_PORT} --served-model-name ${DEFAULT_MODEL_NAME} --gpu-memory-utilization 0.85 --max-model-len 8192 --enforce-eager --dtype auto --trust-remote-code
 Restart=on-failure
 RestartSec=10
 User=root
+Group=render
+SupplementaryGroups=render
 
 [Install]
 WantedBy=multi-user.target
