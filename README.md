@@ -13,8 +13,8 @@ on discrete AMD hardware (same 890M `gfx1150` — cannot run concurrently with `
 
 - LXC 113, hostname `hlh-ai-engine-vllm`, IP `192.168.1.13` (gw `192.168.1.1`)
 - ROCm `10.0.0` default (2026-08-26 latest; unpinned — override: `ROCM_VERSION=7.14.1 ./deploy-hlh-ai-engine-vllm.sh`) with AMD RDNA 3 890M iGPU (gfx1150, Strix Halo) — deploy always prints version, never pinned
-- `vLLM` ROCm (`/opt/vllm-venv`, `HSA_OVERRIDE_GFX_VERSION=11.5.0`, `gpu_memory_utilization=0.85`) serving OpenAI-compatible API on port `8000` (`/health` + `/v1` + `/v1/chat/completions`)
-- `Open WebUI` (docker `ghcr.io/open-webui/open-webui:main`) on port `8080` (`OPENAI_API_BASE_URL=http://127.0.0.1:8000/v1`), `--network host` inside same LXC
+- `vLLM` ROCm (`/opt/vllm-venv`, `HSA_OVERRIDE_GFX_VERSION=11.0.0`, `gpu_memory_utilization=0.70`) serving OpenAI-compatible API on port `8000` (`/health` + `/v1` + `/v1/chat/completions`) with `--limit-mm-per-prompt '{"image":1,"video":1}'`
+- `Open WebUI` (docker `ghcr.io/open-webui/open-webui:main`) on port `80` (`OPENAI_API_BASE_URL=http://127.0.0.1:8000/v1`), `--network host` inside same LXC
 - Model storage on `RaidZ1-6TB` ZFS pool (`/srv/ai/models` host → `/srv/ai/models` LXC bind mount, same path as siblings; HF cache at `/srv/ai/models/.hf-cache`, GGUF for llama sibling ignored by vLLM)
 
 > **Memory caveat:** 890M is 48G VRAM (UMA 88G with GTT). vLLM claims `gpu_memory_utilization` fraction of total VRAM for KV cache at startup (default `0.85`). `hlh-ai-engine` (`112`) and this `113` share the single iGPU — stop the other first: `pct stop 112 && pct start 113` (or vice versa). `hlh-ai-engine-k80` (`131`) uses separate OCuLink Tesla, so it can run alongside either.
@@ -62,7 +62,7 @@ curl -s http://127.0.0.1:8000/health; curl -s http://127.0.0.1:8000/v1/models | 
 Open WebUI chat:
 
 ```
-http://192.168.1.13:8080   # login admin on first visit, models pulled from vLLM :8000
+http://192.168.1.13:80   # login admin on first visit, models pulled from vLLM :8000
 ```
 
 ## Deployment Model
@@ -73,7 +73,7 @@ Deployment and configuration are separate phases (same as `hlh-ai-engine`):
    (`card1`+`renderD129`+`kfd` only — `gfx803` excluded), prints `ROCm ${ROCM_VERSION}` + `vLLM ROCm gfx1150 + Open WebUI`,
    upgrades host ROCm if major mismatch (`7.14`→`10.0` via `stable.repo.amd.com` prompt), and pushes `ansible/files/configure-ai-engine-inside-lxc.sh` via `pct push` (`env ROCM_VERSION=...` forwarded).
 2. **Configuration**: `ansible/playbooks/hlh-ai-engine-vllm.yml` runs `ansible/files/configure-ai-engine-inside-lxc.sh` inside the container
-   (installs `ROCM_VERSION` `amdrocm${MM}-gfx1150`, creates `/opt/vllm-venv`, `pip install vllm[rocm]`, installs `docker.io`, creates `vllm.service` `:8000` + `open-webui.service` `:8080` docker with `--network host`).
+   (installs `ROCM_VERSION` `amdrocm${MM}-gfx1150`, creates `/opt/vllm-venv`, `pip install vllm[rocm]`, installs `docker.io`, creates `vllm.service` `:8000` + `open-webui.service` `:80` docker with `--network host`).
 
 ## OpenTofu Module
 
@@ -100,10 +100,10 @@ module "hlh_ai_engine_vllm" {
 |------|-------|
 | LXC | `113` `hlh-ai-engine-vllm` `192.168.1.13/24` `prox01` `RaidZ1-6TB` |
 | vLLM API (OpenAI) | `http://192.168.1.13:8000` (`/health`, `/v1/models`, `/v1/chat/completions`, `/v1/completions`) |
-| Open WebUI | `http://192.168.1.13:8080` (docker `open-webui`, `OPENAI_API_BASE_URL=http://127.0.0.1:8000/v1`) |
+| Open WebUI | `http://192.168.1.13:80` (docker `open-webui`, `OPENAI_API_BASE_URL=http://127.0.0.1:8000/v1`) |
 | Model storage | `/srv/ai/models` host (RaidZ1-6TB) ↔ `/srv/ai/models` LXC (`mp0`, same path as siblings, `775`); HF cache `/.hf-cache` |
 | GPU device | `/dev/dri/card1` `226:1` + `renderD129` `226:129` + `/dev/kfd` `511:0` (`gfx1150` 890M only) |
-| Default model | `Qwen/Qwen2.5-Coder-32B-Instruct` (HF safetensors, `served-model-name qwen2.5-coder-32b`, `gpu_memory_utilization 0.85`, `max_model_len 8192`, `enforce_eager`) |
+| Default model | `/srv/ai/models/Qwen3.5-9B-safetensors` (`served-model-name qwen3.5-9b`, `gpu_memory_utilization 0.70`, `max_model_len 4096`, `enforce_eager`, `mm` patched) |
 | ROCm | `10.0.0` default never pinned (`amdrocm10.0-gfx1150` or generic `amdrocm10.0` via `ROCM_MM`) |
 
 ## Repository Layout
@@ -115,7 +115,7 @@ hlh-ai-engine-vllm/
 ├── ansible/
 │   ├── inventories/hlh-ai-engine-vllm.yml
 │   ├── playbooks/hlh-ai-engine-vllm.yml
-│   └── files/configure-ai-engine-inside-lxc.sh  # vLLM venv + vllm.service :8000 + open-webui.service :8080
+│   └── files/configure-ai-engine-inside-lxc.sh  # vLLM venv + vllm.service :8000 + open-webui.service :80
 ├── opentofu/
 │   ├── main.tf
 │   └── variables.tf
@@ -128,7 +128,7 @@ hlh-ai-engine-vllm/
 
 ## GPU Backend Notes
 
-**vLLM ROCm only, Open WebUI is UI only.** `vLLM` has no built-in WebUI (unlike `llama.cpp` `:80` and `ollama`). Correct split is `vLLM :8000` (inference, `HSA_OVERRIDE_GFX_VERSION=11.5.0`, `gfx1150` via `amdrocm${MM}-gfx1150`) + `Open WebUI :8080` (chat, `ghcr.io/open-webui/open-webui:main` docker `--network host`).
+**vLLM ROCm only, Open WebUI is UI only.** `vLLM` has no built-in WebUI (unlike `llama.cpp` `:80` and `ollama`). Correct split is `vLLM :8000` (inference, `HSA_OVERRIDE_GFX_VERSION=11.5.0`, `gfx1150` via `amdrocm${MM}-gfx1150`) + `Open WebUI :80` (chat, `ghcr.io/open-webui/open-webui:main` docker `--network host`).
 
 - ROCm `10.0.0` default never pinned (host must match LXC major; deploy prompts `7.14→10.0` upgrade via `stable.repo.amd.com` for `debian13`/`ubuntu2404`). `7.14.1` still via `ROCM_VERSION=7.14.1`.
 - `gfx1150` is community-tier for `vLLM` ROCm (APU `150e` UMA `48G VRAM + 40G GTT = 88G`); `vLLM` uses `gpu_memory_utilization` (default `0.85`) to carve KV cache at startup. `hlh-ai-engine` `llama.cpp` `HIP+Vulkan` handles large `96K` contexts via Vulkan GTT; `vLLM` may need `--enforce-eager` for APU.
@@ -139,20 +139,20 @@ Default `vllm.service` flags (from systemd unit):
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--model` | `Qwen/Qwen2.5-Coder-32B-Instruct` | HF model ID |
+| `--model` | `/srv/ai/models/Qwen3.5-9B-safetensors` | Local safetensors (HF cache `/srv/ai/models/.hf-cache`) |
 | `--host` | `0.0.0.0` | Listen all |
 | `--port` | `8000` | OpenAI API |
-| `--served-model-name` | `qwen2.5-coder-32b` | Name exposed in `/v1/models` |
-| `--gpu-memory-utilization` | `0.85` | Fraction of VRAM for KV cache |
-| `--max-model-len` | `8192` | Context window |
+| `--served-model-name` | `qwen3.5-9b` | Name exposed in `/v1/models` |
+| `--gpu-memory-utilization` | `0.70` | Fraction of VRAM for KV cache (APU safe) |
+| `--max-model-len` | `4096` | Context window |
 | `--enforce-eager` | `true` | Disable CUDA graphs (needed for APU) |
-| `--dtype` | `half` | `fp16` |
+| `--dtype` | `auto` | `auto` + `--trust-remote-code` + `--limit-mm-per-prompt '{"image":1,"video":1}'` |
 
 Open WebUI env (from `open-webui.service`):
 
 | Var | Value |
 |-----|-------|
-| `PORT` | `8080` |
+| `PORT` | `80` |
 | `OPENAI_API_BASE_URL` | `http://127.0.0.1:8000/v1` |
 | `BYPASS_MODEL_ACCESS_CONTROL` | `true` |
 
@@ -166,7 +166,7 @@ Switch model: `vllm-switch-model.sh` rewrites `--model` + `--served-model-name` 
 | WebUI status | `systemctl status open-webui` / `docker ps` |
 | vLLM health | `curl -s http://127.0.0.1:8000/health` |
 | vLLM models | `curl -s http://127.0.0.1:8000/v1/models` |
-| Open WebUI | `curl -s http://127.0.0.1:8080/` |
+| Open WebUI | `curl -s http://127.0.0.1:80/` |
 | GPU HIP | `rocm-smi && hipconfig --version` |
 | Logs vLLM | `journalctl -u vllm -f` |
 | Logs WebUI | `journalctl -u open-webui -f` / `docker logs -f open-webui` |

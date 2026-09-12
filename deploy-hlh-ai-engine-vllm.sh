@@ -247,7 +247,7 @@ pct create "${LXC_ID}" "${LXC_IMAGE}" \
 	--unprivileged 0 \
 	--onboot 1 \
 	--mp0 "${MODEL_HOST_DIR},mp=${MODEL_LXC_DIR}" \
-	--description "vLLM AI engine ${VLLM_BACKEND} ROCm ${ROCM_VERSION}, model storage on ${POOL} (Qwen3-Coder-30B)"
+	--description "vLLM AI engine ${VLLM_BACKEND} ROCm ${ROCM_VERSION}, model storage on ${POOL} (Qwen3.5-9B qwen3.5-9b)"
 
 echo "[3/6] Adding GPU/ROCm passthrough devices..."
 # Only the 890M iGPU (gfx1150): card1 (226:1) + renderD129 (226:129)
@@ -287,5 +287,5 @@ echo "[6/6] Deployment complete. LXC ${LXC_ID} (${LXC_NAME}) is running."
 echo "Model storage: ${MODEL_HOST_DIR} (host) <-> ${MODEL_LXC_DIR} (container) on ${POOL}"
 echo "ROCm version : ${ROCM_VERSION} | Backend: ${VLLM_BACKEND} (gfx1150, ROCm HIP)"
 echo "vLLM API (OpenAI-compatible) : http://192.168.1.13:8000 ( /health /v1/models /v1/chat/completions )"
-echo "Open WebUI                    : http://192.168.1.13:8080 (chat UI, proxied to vLLM :8000)"
-echo "Health: curl -s http://192.168.1.13:8000/health && curl -s http://192.168.1.13:8000/v1/models | head -100"
+echo "Open WebUI                    : http://192.168.1.13:80 (chat UI, proxied to vLLM :8000, --security-opt apparmor=unconfined)"
+echo "Health: curl -s http://192.168.1.13:8000/health && curl -s http://192.168.1.13:8000/v1/models | head -100 && curl -s -I http://192.168.1.13:80 | head -5"

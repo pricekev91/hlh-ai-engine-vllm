@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # configure-ai-engine-inside-lxc.sh (vLLM variant)
-# Version: 0.1.2
+# Version: 0.1.3
 # Description: Bootstrap vLLM + Open WebUI on Ubuntu 24.04 LXC with ROCm passthrough (gfx1150)
 # Target GPU: AMD Radeon 890M (gfx1150/Strix Halo) on Proxmox 9.x privileged LXC — mirrors hlh-ai-engine 113/192.168.1.13
 # Requirements: Run as root inside privileged LXC with GPU passthrough (/dev/dri/card1, renderD129, /dev/kfd) and /srv/ai/models bind mount
 # Changelog:
+#   0.1.3 - Fix Open WebUI privileged LXC AppArmor (add --security-opt apparmor=unconfined), move WEBUI_PORT 8080 -> 80, default model /srv/ai/models/Qwen3.5-9B-safetensors (qwen3.5-9b, 0.70/4096+mm), mirror live 113 flags
 #   0.1.2 - Fix vLLM bootstrap: HF Qwen2.5-7B (not GGUF qwen35moe which 0.6.6 cannot load), GFX 11.0.0 override (11.5.0 gives HIP invalid device), ld.so.conf for libamd_smi, amdsmi 27.0.0
 #   0.1.1 - Default model now shared GGUF /srv/ai/models/Qwen3.6-35B-A3B-MTP-Q4_K_M.gguf (same as hlh-ai-engine 112, 98304 ctx) — added hf-cache check, VLLM_LOGGING_LEVEL=DEBUG, pre-check rocm-smi (reverted: GGUF not supported by vLLM 0.6.6)
 #   0.1.0 - Initial vLLM variant forked from hlh-ai-engine v0.9.4
@@ -16,18 +17,17 @@ set -euo pipefail
 
 # --- CONFIGURABLE ---
 MODEL_DIR="/srv/ai/models"
-# User wants GGUF /srv/ai/models/Qwen3.6-35B-A3B-MTP-Q4_K_M.gguf (qwen35moe) as default — but vLLM 0.6.6/0.29.0 + transformers cannot load that GGUF (qwen35moe not supported).
-# That GGUF is for hlh-ai-engine 112 (llama.cpp). For vLLM, default to HF safetensors that is supported and loads on 890M.
-# HF cache is at /srv/ai/models/.hf-cache (shared). The GGUF remains on disk for llama sibling and for future vLLM GGUF support (try via vllm-switch-model.sh).
-DEFAULT_MODEL_HF="Qwen/Qwen2.5-7B-Instruct"
-DEFAULT_MODEL_NAME="qwen2.5-7b"
-# To serve the requested Qwen3.6-35B on vLLM when HF available, use: vllm-switch-model.sh -> Qwen/Qwen3-35B-A3B or Qwen/Qwen2.5-32B
+# Default model is now local safetensors at /srv/ai/models/Qwen3.5-9B-safetensors (qwen3.5-9b)
+# Previous HF defaults Qwen/Qwen2.5-7B-Instruct (qwen2.5-7b) kept as fallback via vllm-switch-model.sh.
+# HF cache is at /srv/ai/models/.hf-cache (shared). GGUF Qwen3.6-35B qwen35moe remains for llama.cpp sibling (vLLM 0.29.0 cannot load GGUF qwen35moe).
+DEFAULT_MODEL_HF="/srv/ai/models/Qwen3.5-9B-safetensors"
+DEFAULT_MODEL_NAME="qwen3.5-9b"
 VENV_DIR="/opt/vllm-venv"
 ROCM_PATH="/opt/rocm"
 ROCM_VERSION="${ROCM_VERSION:-10.0.0}"
 GFX_VERSION="11.0.0"   # gfx1150 via HSA_OVERRIDE 11.0.0 for torch ROCm 6.2/6.4 (11.5.0 gave HIP invalid device with 2.5.1+rocm6.2 on 0.6.6)
 VLLM_PORT="8000"
-WEBUI_PORT="8080"
+WEBUI_PORT="80"
 VLLM_SERVICE="/etc/systemd/system/vllm.service"
 WEBUI_SERVICE="/etc/systemd/system/open-webui.service"
 SWITCH_SCRIPT="/usr/local/bin/vllm-switch-model.sh"
@@ -168,16 +168,16 @@ deactivate
 # --- 3. MODEL DIR ---
 echo "[3/6] Setting up model directory ${MODEL_DIR}..."
 mkdir -p "${MODEL_DIR}"
-# Shared GGUF: ensure the default GGUF exists (it is the hlh-ai-engine 112 model). vLLM can load this GGUF directly (experimental)
-# and will also use HF cache for safetensors models. Keep both paths.
+# Shared storage: /srv/ai/models holds both GGUF (llama.cpp) and safetensors (vLLM). Default is now local safetensors /srv/ai/models/Qwen3.5-9B-safetensors.
 mkdir -p /root/.cache/huggingface 2>&1 || true
 mkdir -p "${MODEL_DIR}/.hf-cache" 2>&1 || true
-if [ -f "${DEFAULT_MODEL_HF}" ]; then
-  echo "Default GGUF present: ${DEFAULT_MODEL_HF} ($(du -h "${DEFAULT_MODEL_HF}" 2>&1 | awk '{print $1}'))"
+if [ -e "${DEFAULT_MODEL_HF}" ]; then
+  echo "Default model present: ${DEFAULT_MODEL_HF} ($(du -sh "${DEFAULT_MODEL_HF}" 2>&1 | awk '{print $1}'))"
+  ls -lh "${DEFAULT_MODEL_HF}" 2>&1 | head -20 || true
 else
   echo "WARNING: Default model ${DEFAULT_MODEL_HF} not found on ${MODEL_DIR} — vLLM will fail to start until model is present."
-  echo "Available .gguf in ${MODEL_DIR}:"
-  ls -lh "${MODEL_DIR}"/*.gguf 2>&1 | head -20 || true
+  echo "Available models in ${MODEL_DIR}:"
+  ls -lh "${MODEL_DIR}" 2>&1 | head -30 || true
 fi
 # Create a helper for HF download (mirrors dl.sh but for HF)
 cat > "${MODEL_DIR}/dl-hf.sh" << 'EOS'
@@ -217,9 +217,12 @@ Environment=PATH=${VENV_DIR}/bin:${ROCM_PATH}/bin:${ROCM_PATH}/llvm/bin:/usr/loc
 Environment=HF_HUB_CACHE=/srv/ai/models/.hf-cache
 Environment=HF_HOME=/srv/ai/models/.hf-cache
 Environment=PYTHONPATH=/opt/rocm/share/amd_smi:/opt/rocm/lib/python3.12/site-packages
-Environment=VLLM_LOGGING_LEVEL=DEBUG
-# vLLM on gfx1150 APU: enforce_eager needed, dtype auto. GGUF Qwen3.6-35B qwen35moe not supported by vLLM 0.29.0/transformers, so default HF Qwen2.5-7B.
-ExecStart=${VENV_DIR}/bin/python -m vllm.entrypoints.openai.api_server --model ${DEFAULT_MODEL_HF} --host 0.0.0.0 --port ${VLLM_PORT} --served-model-name ${DEFAULT_MODEL_NAME} --gpu-memory-utilization 0.85 --max-model-len 8192 --enforce-eager --dtype auto --trust-remote-code
+Environment=VLLM_LOGGING_LEVEL=INFO
+Environment=VLLM_USE_TVM_FFI=0
+Environment=TVM_FFI_DISABLE=1
+Environment=PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+Environment=TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1
+ExecStart=${VENV_DIR}/bin/python -m vllm.entrypoints.openai.api_server --model ${DEFAULT_MODEL_HF} --host 0.0.0.0 --port ${VLLM_PORT} --served-model-name ${DEFAULT_MODEL_NAME} --gpu-memory-utilization 0.70 --max-model-len 4096 --enforce-eager --dtype auto --trust-remote-code --limit-mm-per-prompt='{"image":1,"video":1}' --mm-processor-cache-gb 1 --skip-mm-profiling --max-num-seqs 8
 Restart=on-failure
 RestartSec=10
 User=root
@@ -243,8 +246,8 @@ Wants=vllm.service
 Type=simple
 # Pull image on first start
 ExecStartPre=-/usr/bin/docker pull ghcr.io/open-webui/open-webui:main
-# Run with host networking so UI can reach vLLM at 127.0.0.1:${VLLM_PORT}
-ExecStart=/usr/bin/docker run --rm --name open-webui --network host -v open-webui:/app/backend/data -e PORT=${WEBUI_PORT} -e OPENAI_API_BASE_URL=http://127.0.0.1:${VLLM_PORT}/v1 -e BYPASS_MODEL_ACCESS_CONTROL=true ghcr.io/open-webui/open-webui:main
+# Run with host networking so UI can reach vLLM at 127.0.0.1:${VLLM_PORT} — privileged LXC needs apparmor=unconfined or docker-default fails (exit 125)
+ExecStart=/usr/bin/docker run --rm --name open-webui --network host --security-opt apparmor=unconfined -v open-webui:/app/backend/data -e PORT=${WEBUI_PORT} -e OPENAI_API_BASE_URL=http://127.0.0.1:${VLLM_PORT}/v1 -e BYPASS_MODEL_ACCESS_CONTROL=true ghcr.io/open-webui/open-webui:main
 ExecStop=/usr/bin/docker stop open-webui
 Restart=on-failure
 RestartSec=10
