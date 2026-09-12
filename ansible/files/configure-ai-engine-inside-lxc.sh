@@ -140,6 +140,8 @@ echo "[2/6] Pre-check: rocm-smi + hip + /dev/kfd"
 rocm-smi 2>&1 | head -30 || echo "WARNING: rocm-smi no GPUs (host/LXC ROCm mismatch?)"
 rocminfo 2>&1 | head -30 || true
 ls -l /dev/kfd /dev/dri/card0 /dev/dri/renderD128 2>&1 | head -10 || true
+# Ensure kfd is accessible (needs render group)
+sg render -c "rocm-smi" 2>&1 | head -20 || true
 # Install torch ROCm first so vLLM picks ROCm torch, not CUDA/CPU. Use rocm6.4 for newer vLLM (0.29.0 needs torch 2.8+), rocm6.2 for 0.6.6 needs 2.5
 pip install --index-url https://download.pytorch.org/whl/rocm6.4 "torch==2.8.0+rocm6.4" "torchvision==0.23.0+rocm6.4" 2>&1 | tail -50 || \
   pip install --extra-index-url https://download.pytorch.org/whl/rocm6.2 torch torchvision --upgrade 2>&1 | tail -30 || true

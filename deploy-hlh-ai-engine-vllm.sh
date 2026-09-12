@@ -261,7 +261,9 @@ cat >> "/etc/pve/lxc/${LXC_ID}.conf" <<'LXCCONF'
 # Earlier configs used card1/renderD129 when K80 was not enumerated as card0; on current host (trixie, 7.0.14-11-pve) 890M is card0.
 lxc.cgroup2.devices.allow: c 226:0 rwm
 lxc.cgroup2.devices.allow: c 226:128 rwm
+# kfd major is 511 on ROCm 7.x, 234 on ROCm 10.x (both seen on trixie) — allow both for forward compat
 lxc.cgroup2.devices.allow: c 511:0 rwm
+lxc.cgroup2.devices.allow: c 234:0 rwm
 # Mount only the 890M nodes; /dev/dri is created automatically by LXC.
 # NOTE: Do NOT use 'lxc.mount.entry: none dev/dri ...' — on Proxmox 9.x that
 # incorrectly mounts the host root (rpool/ROOT/pve-1) onto /dev/dri inside the
