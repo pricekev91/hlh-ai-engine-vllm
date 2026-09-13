@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # configure-ai-engine-inside-lxc.sh (vLLM variant)
-# Version: 0.1.3
+# Version: 0.1.5
 # Description: Bootstrap vLLM + Open WebUI on Ubuntu 24.04 LXC with ROCm passthrough (gfx1150)
 # Target GPU: AMD Radeon 890M (gfx1150/Strix Halo) on Proxmox 9.x privileged LXC — mirrors hlh-ai-engine 113/192.168.1.13
 # Requirements: Run as root inside privileged LXC with GPU passthrough (/dev/dri/card1, renderD129, /dev/kfd) and /srv/ai/models bind mount
 # Changelog:
+#   0.1.5 - Fix ROCm dlpack (torch_c_dlpack_ext cuda->hip patch), remove CUDA torchaudio, symlink libtorch_cuda.so, keep 0.1.4 torch reinstall
+#   0.1.4 - Fix torch ROCm overwrite (vLLM 0.29.0 pulls CUDA 2.13.0, reinstall 2.8.0+rocm6.4 after vLLM), verify hip
 #   0.1.3 - Fix Open WebUI privileged LXC AppArmor (add --security-opt apparmor=unconfined), move WEBUI_PORT 8080 -> 80, default model /srv/ai/models/Qwen3.5-9B-safetensors (qwen3.5-9b, 0.70/4096+mm), mirror live 113 flags
 #   0.1.2 - Fix vLLM bootstrap: HF Qwen2.5-7B (not GGUF qwen35moe which 0.6.6 cannot load), GFX 11.0.0 override (11.5.0 gives HIP invalid device), ld.so.conf for libamd_smi, amdsmi 27.0.0
 #   0.1.1 - Default model now shared GGUF /srv/ai/models/Qwen3.6-35B-A3B-MTP-Q4_K_M.gguf (same as hlh-ai-engine 112, 98304 ctx) — added hf-cache check, VLLM_LOGGING_LEVEL=DEBUG, pre-check rocm-smi (reverted: GGUF not supported by vLLM 0.6.6)
@@ -159,6 +161,54 @@ if ! "${VENV_DIR}/bin/python" -c "import vllm; print(vllm.__version__)" 2>&1 | h
   pip install vllm 2>&1 | tail -50 || true
 fi
 "${VENV_DIR}/bin/python" -c "import vllm; print('vLLM', vllm.__version__)" 2>&1 | head -5 || echo "WARNING: vLLM import failed — may need ROCm-specific wheel"
+# vLLM pulls CUDA torch (2.13.0+cu130) overwriting ROCm torch — must reinstall ROCm torch after vLLM
+echo "[2/6] Re-installing ROCm torch 2.8.0+rocm6.4 after vLLM (vLLM deps overwrite with CUDA) ..."
+pip install --index-url https://download.pytorch.org/whl/rocm6.4 --force-reinstall --no-deps "torch==2.8.0+rocm6.4" "torchvision==0.23.0+rocm6.4" 2>&1 | tail -50 || \
+  pip install --index-url https://download.pytorch.org/whl/rocm6.4 "torch==2.8.0+rocm6.4" "torchvision==0.23.0+rocm6.4" --force-reinstall 2>&1 | tail -50 || true
+# Verify ROCm torch is back
+"${VENV_DIR}/bin/python" -c "import torch; print('torch', torch.__version__, 'hip', torch.version.hip, 'cuda_avail', torch.cuda.is_available(), 'devs', torch.cuda.device_count() if hasattr(torch.cuda, 'device_count') else 'n/a')" 2>&1 | tail -20 || true
+# Fix ROCm: torch_c_dlpack_ext picks cuda addon even on HIP (needs libtorch_cuda.so) — patch to return early on HIP
+echo "[2/6] Patching torch_c_dlpack_ext for ROCm HIP (disable CUDA dlpack) ..."
+python3 <<'PY' 2>&1 | tail -20 || true
+import pathlib
+p = pathlib.Path("/opt/vllm-venv/lib/python3.12/site-packages/torch_c_dlpack_ext/core.py")
+if p.exists():
+    text = p.read_text()
+    old = """def load_torch_c_dlpack_extension() -> None:
+    \"\"\"Load the torch c dlpack extension based on torch version.\"\"\"
+    if hasattr(torch.Tensor, \"__dlpack_c_exchange_api__\") or hasattr(
+        torch.Tensor, \"__c_dlpack_exchange_api__\"
+    ):
+        return None"""
+    new = """def load_torch_c_dlpack_extension() -> None:
+    \"\"\"Load the torch c dlpack extension based on torch version.\"\"\"
+    # ROCm HIP: disable cuda dlpack addon which requires libtorch_cuda.so (only hip available)
+    try:
+        import torch
+        if getattr(torch.version, \"hip\", None) is not None:
+            return None
+    except Exception:
+        pass
+    if hasattr(torch.Tensor, \"__dlpack_c_exchange_api__\") or hasattr(
+        torch.Tensor, \"__c_dlpack_exchange_api__\"
+    ):
+        return None"""
+    if old in text:
+        text = text.replace(old, new)
+        p.write_text(text)
+        print("patched torch_c_dlpack_ext/core.py for HIP")
+    else:
+        print("core.py already patched or not found")
+else:
+    print("core.py not found, skipping patch")
+PY
+# Uninstall torchaudio CUDA (requires libcudart.so.13) — vLLM 0.29.0 pulls CUDA torchaudio which fails on ROCm
+echo "[2/6] Removing CUDA torchaudio (fails on ROCm, pulls libcudart) ..."
+pip uninstall -y torchaudio 2>&1 | tail -10 || true
+# Symlink libtorch_hip.so -> libtorch_cuda.so for xgrammar/tvm_ffi which hardcodes cuda name
+echo "[2/6] Symlink libtorch_hip.so -> libtorch_cuda.so for ROCm compat ..."
+ln -sf /opt/vllm-venv/lib/python3.12/site-packages/torch/lib/libtorch_hip.so /opt/vllm-venv/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so 2>&1 | head -5 || true
+ls -lh /opt/vllm-venv/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so 2>&1 | head -5 || true
 # Pin transformers to 5.17 for vLLM 0.29.0 (4.45 too old, 5.17 works for Qwen2.5-7B)
 pip install "transformers==5.17.0" 2>&1 | tail -20 || true
 # Debug device inference right after install
