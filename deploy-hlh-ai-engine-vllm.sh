@@ -67,14 +67,26 @@ echo ""
 get_host_rocm_version() {
   local ver=""
   # Prefer installed package version (e.g. 7.14.0-3, 10.0.0-4)
-  ver="$(dpkg-query -W -f='${Version}' amdrocm-core 2>/dev/null | cut -d- -f1)"
+  # ROCm 10.x packages (prioritized over 7.x since 10.x is newer):
+  #   amdrocm10.0, amdrocm-core10.0, amdrocm-base10.0, etc.
+  ver="$(dpkg-query -W -f='${Version}' amdrocm10.0 2>/dev/null | cut -d- -f1)"
+  if [[ -z "$ver" ]]; then
+    ver="$(dpkg-query -W -f='${Version}' amdrocm-core10.0 2>/dev/null | cut -d- -f1)"
+  fi
+  if [[ -z "$ver" ]]; then
+    ver="$(dpkg-query -W -f='${Version}' amdrocm-base10.0 2>/dev/null | cut -d- -f1)"
+  fi
+  if [[ -z "$ver" ]]; then
+    ver="$(dpkg-query -W -f='${Version}' amdrocm-core 2>/dev/null | cut -d- -f1)"
+  fi
+  # ROCm 7.x packages (fallback)
   if [[ -z "$ver" ]]; then
     ver="$(dpkg -l 2>/dev/null | awk '/^ii[ ]+amdrocm-core7/{print $3}' | head -1 | cut -d- -f1)"
   fi
   if [[ -z "$ver" ]]; then
     ver="$(dpkg -l 2>/dev/null | awk '/^ii[ ]+amdrocm7\.14/{print $3}' | head -1 | cut -d- -f1)"
   fi
-  # Fallback: rocm-smi lib version
+  # Fallback: rocm-smi version string
   if [[ -z "$ver" ]]; then
     ver="$(rocm-smi --version 2>/dev/null | grep -oP '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
   fi

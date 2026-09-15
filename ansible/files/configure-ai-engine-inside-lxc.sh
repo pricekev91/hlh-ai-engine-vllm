@@ -5,7 +5,7 @@
 # Target GPU: AMD Radeon 890M (gfx1150/Strix Halo) on Proxmox 9.x privileged LXC — mirrors hlh-ai-engine 113/192.168.1.13
 # Requirements: Run as root inside privileged LXC with GPU passthrough (/dev/dri/card1, renderD129, /dev/kfd) and /srv/ai/models bind mount
 # Changelog:
-#   0.1.5 - Fix ROCm dlpack (torch_c_dlpack_ext cuda->hip patch), remove CUDA torchaudio, symlink libtorch_cuda.so, keep 0.1.4 torch reinstall
+#   0.1.6 - Fix HSA_OVERRIDE_GFX_VERSION to 11.5.0 (proper gfx1150 for ROCm 10.x), fix host ROCm detection in deploy script to find 10.0.0 (was returning 7.14.0 or unknown)
 #   0.1.4 - Fix torch ROCm overwrite (vLLM 0.29.0 pulls CUDA 2.13.0, reinstall 2.8.0+rocm6.4 after vLLM), verify hip
 #   0.1.3 - Fix Open WebUI privileged LXC AppArmor (add --security-opt apparmor=unconfined), move WEBUI_PORT 8080 -> 80, default model /srv/ai/models/Qwen3.5-9B-safetensors (qwen3.5-9b, 0.70/4096+mm), mirror live 113 flags
 #   0.1.2 - Fix vLLM bootstrap: HF Qwen2.5-7B (not GGUF qwen35moe which 0.6.6 cannot load), GFX 11.0.0 override (11.5.0 gives HIP invalid device), ld.so.conf for libamd_smi, amdsmi 27.0.0
@@ -27,7 +27,7 @@ DEFAULT_MODEL_NAME="qwen3.5-9b"
 VENV_DIR="/opt/vllm-venv"
 ROCM_PATH="/opt/rocm"
 ROCM_VERSION="${ROCM_VERSION:-10.0.0}"
-GFX_VERSION="11.0.0"   # gfx1150 via HSA_OVERRIDE 11.0.0 for torch ROCm 6.2/6.4 (11.5.0 gave HIP invalid device with 2.5.1+rocm6.2 on 0.6.6)
+GFX_VERSION="11.5.0"   # gfx1150 (Strix Halo) via HSA_OVERRIDE — 11.5.0 is the proper gfx1150 ID for ROCm 10.x
 VLLM_PORT="8000"
 WEBUI_PORT="80"
 VLLM_SERVICE="/etc/systemd/system/vllm.service"
