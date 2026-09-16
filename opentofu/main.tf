@@ -51,8 +51,9 @@ resource "proxmox_lxc" "hlh_ai_engine_vllm" {
   # Do NOT use Proxmox native GPU passthrough here; it exposes all DRM devices
   # and causes ROCm to enumerate the RX 480 (gfx803, unsupported) as GPU 0.
   # Instead, deploy-hlh-ai-engine-vllm.sh appends explicit cgroup2/device mount rules
-  # that expose only the 890M's DRM nodes (card1 226:1, renderD129 226:129) + shared kfd (511:0).
-  # Bootstrap then installs vLLM ROCm + Open WebUI (vllm pip + docker open-webui).
+  # that expose only the 890M's DRM nodes (card0 226:0, renderD128 226:128) + shared kfd (511:0).
+  # Bootstrap then installs docker + vllm.service running the official
+  # vllm/vllm-openai-rocm image (phase 1; Open WebUI deferred to phase 10).
 
   # Model storage volume mount (host /srv/ai/models -> LXC /srv/ai/models)
   mp0 {

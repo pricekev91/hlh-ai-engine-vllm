@@ -17,16 +17,21 @@ Items for future implementation. These are human-entered ideas not yet reflected
 - Add LXC snapshot before major vLLM version bumps
 - Add `hlh-ai-engine` (112) vs `hlh-ai-engine-vllm` (113) mutual-exclusion guard (same `gfx1150`)
 
-## Open WebUI
+## Open WebUI (phase 10 — deliberately removed from phase-1 bootstrap in 0.2.0)
 
+- Re-add `open-webui.service` on `192.168.1.13:80` (docker `ghcr.io/open-webui/open-webui:main`, `--network host`, `--security-opt apparmor=unconfined`, `OPENAI_API_BASE_URL=http://127.0.0.1:8000/v1`, `BYPASS_MODEL_ACCESS_CONTROL=true`)
 - Add Open WebUI auth hardening (default allows all, `BYPASS_MODEL_ACCESS_CONTROL=true`)
 - Add HTTPS/TLS termination for `:8080` (currently http only)
 - Add `WEBUI_SECRET_KEY` persistence across redeploys
 
+## Docker storage
+
+- Give LXC 113 a dedicated docker data-root subvolume (like the `hlh-docker` pattern on the host) — the rocm image is large and the 64G rootfs is shared with the OS
+
 ## Ansible
 
 - Add ansible-lint to CI
-- Split bootstrap into roles (ROCM, vLLM venv, vllm.service, open-webui)
+- Split bootstrap into roles (docker, vllm.env, vllm.service, open-webui)
 
 ## OpenTofu
 
@@ -40,3 +45,4 @@ Items for future implementation. These are human-entered ideas not yet reflected
 ## Deployment
 
 - Add `--skip-host-driver` flag like `hlh-ai-engine-k80` (skip host ROCm check after first reboot)
+- Pin a known-good `vllm/vllm-openai-rocm` tag after phase-1 validation (default is `:latest`, never pinned)

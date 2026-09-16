@@ -5,6 +5,28 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-09-16
+
+### Changed
+
+- **Phase 1 refactor: vLLM now runs as the official docker image `vllm/vllm-openai-rocm:latest`** (ROCm userspace ships in the image). `vllm.service` `ExecStart` is now `/usr/local/bin/vllm-docker-run.sh` (docker run, `--network host`, `--ipc host`, `--shm-size 16g`, `--device /dev/kfd /dev/dri/renderD128 /dev/dri/card0`, numeric `--group-add`, `--security-opt apparmor=unconfined seccomp=unconfined`, model dir mounted read-only at `/srv/ai/models`; the runner pulls `VLLM_IMAGE` at start so `/etc/vllm.env` is the single source of truth)
+- Runtime config moved to **`/etc/vllm.env`** (`VLLM_IMAGE`, `VLLM_PORT`, `VLLM_MODEL_PATH`, `VLLM_SERVED_NAME`, `VLLM_GPU_MEM_UTIL`, `VLLM_MAX_MODEL_LEN`, `HSA_OVERRIDE_GFX_VERSION`, `VLLM_SHM_SIZE`, `VLLM_LOG_LEVEL`, `VLLM_EXTRA_ARGS`) — edit + `systemctl restart vllm`
+- Default model now **`/srv/ai/models/Qwen3.5-9B`** (18 GB bf16 safetensors, `qwen3_5` hybrid linear-attention VLM, served as `qwen3.5-9b`); `--gpu-memory-utilization 0.40`, `--max-model-len 4096`, `--enforce-eager`, `--trust-remote-code`, `--limit-mm-per-prompt '{"image":1,"video":1}'`
+- `HSA_OVERRIDE_GFX_VERSION` default back to **`11.0.0`** (the proven override on this box; `11.5.0` → `HIP error: invalid device function`, see `checkpoint.md` §4.5) — now set as container env, no in-LXC ROCm/profile.d needed
+- `vllm-switch-model.sh` now edits `/etc/vllm.env` (local dirs or HF ids) instead of sed-ing ExecStart
+- `deploy-hlh-ai-engine-vllm.sh` forwards `VLLM_IMAGE` (not `ROCM_VERSION`) into the bootstrap; host ROCm logic kept (amdgpu kernel driver/firmware for `/dev/kfd`); usage text fixed (said LXC 112, is 113); deploy notes that sibling `112` is never touched
+
+### Removed
+
+- In-LXC ROCm apt install, `/opt/vllm-venv`, `pip vllm==0.29.0` + ROCm torch re-install dance, and all wheel shims/patches (`vllm_rocm_accel_shim`, `torch_c_dlpack_ext` patch, `vllm_c` gating, `libtorch_cuda` symlink) — superseded by the official ROCm image
+- Open WebUI from the phase-1 bootstrap (`open-webui.service` no longer created) — deferred to **phase 10**
+- Stale `Qwen3.5-9B-safetensors` / `qwen3.5-9b 0.70` references throughout
+
+### Added
+
+- `00_BACKLOG.md`: explicit phase-10 Open WebUI section + docker data-root subvolume idea
+- `README.md`: runtime contract, `/etc/vllm.env` tuning table, container flag notes, co-tenancy policy (never stop `112`)
+
 ## [0.1.0] - 2026-09-11
 
 ### Added
