@@ -38,7 +38,7 @@ GFX_VERSION="${HSA_OVERRIDE_GFX_VERSION:-11.0.0}"
 # sibling LXC 112 (hlh-ai-engine, llama.cpp) runs on the SAME iGPU and must not be stopped.
 # Lower to 0.30 if the box OOMs under co-tenancy.
 GPU_MEM_UTIL="${VLLM_GPU_MEM_UTIL:-0.40}"
-MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-4096}"
+MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-131072}"
 VLLM_SERVICE="/etc/systemd/system/vllm.service"
 RUNNER="/usr/local/bin/vllm-docker-run.sh"
 VLLM_ENV="/etc/vllm.env"
