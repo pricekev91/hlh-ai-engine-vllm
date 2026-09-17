@@ -147,7 +147,7 @@ ARGS+=(
   --enforce-eager
   --trust-remote-code
   --enable-auto-tool-choice
-  --tool-call-parser auto
+  --tool-call-parser qwen3_coder
   --limit-mm-per-prompt '{"image":1,"video":1}'
   --mm-processor-cache-gb 1
 )
