@@ -168,7 +168,7 @@ exec docker run --rm --name vllm \
   --group-add "${DRI_GID}" \
   --ipc host \
   --shm-size "${VLLM_SHM_SIZE}" \
-  -v "${VLLM_MODEL_DIR}:/srv/ai/models:ro" \
+  -v "${VLLM_MODEL_DIR}:/srv/ai/models:rw" \
   -e HSA_OVERRIDE_GFX_VERSION="${HSA_OVERRIDE_GFX_VERSION}" \
   -e VLLM_LOGGING_LEVEL="${VLLM_LOG_LEVEL}" \
   -e HF_HUB_CACHE=/srv/ai/models/.hf-cache \
