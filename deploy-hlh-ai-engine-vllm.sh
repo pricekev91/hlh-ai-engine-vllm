@@ -37,7 +37,7 @@ ROCM_VERSION="${ROCM_VERSION:-10.0.0}"
 # The host ROCm stack still matters: it provides the amdgpu kernel driver/firmware behind /dev/kfd.
 VLLM_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai-rocm:latest}"
 VLLM_MODEL_DIR="/srv/ai/models"
-VLLM_DEFAULT_MODEL="Qwen3.5-9B"
+VLLM_DEFAULT_MODEL="Qwen3.6-35B-A3B-GPTQ-Int4"
 VLLM_BACKEND="vLLM ROCm docker image (${VLLM_IMAGE}) serving ${VLLM_MODEL_DIR}/${VLLM_DEFAULT_MODEL}"
 
 while [[ $# -gt 0 ]]; do

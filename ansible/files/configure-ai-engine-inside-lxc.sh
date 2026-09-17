@@ -28,9 +28,9 @@ set -euo pipefail
 VLLM_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai-rocm:latest}"
 VLLM_PORT="${VLLM_PORT:-8000}"
 MODEL_DIR="${MODEL_DIR:-/srv/ai/models}"
-# Default model: local safetensors dir (qwen3_5 VLM, 18GB bf16, 4 shards)
-DEFAULT_MODEL_PATH="${DEFAULT_MODEL_PATH:-${MODEL_DIR}/Qwen3.5-9B}"
-DEFAULT_MODEL_NAME="${DEFAULT_MODEL_NAME:-qwen3.5-9b}"
+# Default model: GPTQ Int4 quantized (35B MoE, ~20GB)
+DEFAULT_MODEL_PATH="${DEFAULT_MODEL_PATH:-${MODEL_DIR}/Qwen3.6-35B-A3B-GPTQ-Int4}"
+DEFAULT_MODEL_NAME="${DEFAULT_MODEL_NAME:-qwen3.6-35b-a3b-gptq-int4}"
 # gfx1150: 11.0.0 (gfx1100 triton-JIT target) is the proven override for this vLLM/torch combo.
 # 11.5.0 -> 'HIP error: invalid device function' at first kernel launch (see checkpoint.md §4.5).
 GFX_VERSION="${HSA_OVERRIDE_GFX_VERSION:-11.0.0}"
