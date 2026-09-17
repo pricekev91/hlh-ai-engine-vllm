@@ -146,6 +146,8 @@ ARGS+=(
   --max-model-len "${VLLM_MAX_MODEL_LEN}"
   --enforce-eager
   --trust-remote-code
+  --enable-auto-tool-choice
+  --tool-call-parser auto
   --limit-mm-per-prompt '{"image":1,"video":1}'
   --mm-processor-cache-gb 1
 )
