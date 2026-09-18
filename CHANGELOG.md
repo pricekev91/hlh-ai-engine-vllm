@@ -5,6 +5,12 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2026-09-18
+
+### Fixed
+
+- **CRITICAL: amdsmi pip vs lib ABI mismatch** — `pip amdsmi 7.0.2` vs system `libamd_smi.so 27.0.0` (ROCm 10.0) `AttributeError: undefined symbol: amdsmi_set_gpu_clk_range` at `amdsmi/amdsmi_wrapper.py:2642` triggered via `torch/cuda/__init__.py:110 import amdsmi` and `vllm_rocm_accel_shim.pth:1` (Grok correctly diagnosed pip vs system version skew). Now: uninstall pip `amdsmi`, reinstall from `/opt/rocm/share/amd_smi` (guaranteed ABI match) when present, else leave uninstalled and rely on `vllm/platforms/__init__.py:411` HIP fallback; verify `import torch` succeeds before proceeding. Live LXC `113` was on restart loop 94 due to this.
+
 ## [0.3.1] - 2026-09-18
 
 ### Fixed
@@ -12,7 +18,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CRITICAL: vLLM V2 runner UVA crash** — `AttributeError: torch.ops._C.get_cuda_view_from_cpu_tensor` at `vllm/utils/torch_utils.py:916` → `vllm/v1/worker/gpu/buffer_utils.py:50` (GPUModelRunnerV2). PyPI `vllm 0.29.0` CUDA wheel has no ROCm UVA op on `torch 2.8.0+rocm6.4`. Fix: set `VLLM_USE_V2_MODEL_RUNNER=0` in `/etc/vllm.env`, `vllm-run.sh`, and `vllm.service` (`Environment=VLLM_USE_V2_MODEL_RUNNER=0`) — proven `checkpoint.md:4-5`.
 - **ROCm paths** — runner hardcoded `/opt/rocm/core-10.0` but live LXC uses `/opt/rocm` symlink (`/etc/alternatives/core`). Now uses `/opt/rocm/lib` + `PATH=/opt/rocm/bin`; `ld.so.conf` covers both.
 - **Triton pin** — `pytorch-triton-rocm 3.4.0` vs `triton 3.7.1` mismatch → `cannot import constexpr_function`. Now force `triton==3.4.0` after venv.
-- **amdsmi pip** — add `pip install amdsmi` for clean `vllm/platforms/rocm.py` detection (fallback shim retained).
 - **Deploy UX** — `deploy-hlh-ai-engine-vllm.sh` now offers `y` (destroy/recreate) / `u` (update in-place, fast ~2-5 min) / `n` (abort) when LXC exists; flags `--update` / `--destroy` for non-interactive.
 
 ### Changed

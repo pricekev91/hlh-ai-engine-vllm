@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # configure-ai-engine-inside-lxc.sh (vLLM native variant)
-# Version: 0.3.1
+# Version: 0.3.2
 # Description: Bootstrap native vLLM (no docker) on Ubuntu 24.04 LXC
 #              with ROCm userspace installed in-container (gfx1150).
 # Target GPU: AMD Radeon 890M (gfx1150/Strix Halo) on Proxmox 9.x privileged LXC
 # Requirements: Run as root inside privileged LXC with GPU passthrough
 #               (/dev/dri/card0, renderD128, /dev/kfd) and /srv/ai/models bind mount
 # Changelog:
+#   0.3.2 - FIX: amdsmi pip vs lib mismatch (pip 7.0.2 wants amdsmi_set_gpu_clk_range
+#           missing in libamd_smi.so 27.0.0 from ROCm 10.0; Grok correctly diagnosed
+#           pip vs system ABI). Now install amdsmi from /opt/rocm/share/amd_smi
+#           (matching system lib) or uninstall pip copy and rely on HIP fallback.
 #   0.3.1 - FIX: VLLM_USE_V2_MODEL_RUNNER=0 (checkpoint.md proven: CUDA-wheel has no UVA
 #           op get_cuda_view_from_cpu_tensor, V2 crashes; V1 runner works). Fix ROCm
 #           paths (/opt/rocm vs /opt/rocm/core-10.0), pin triton to 3.4.0 to match
@@ -174,9 +178,25 @@ fi
 echo "[3/8] Pinning triton to 3.4.0 to match pytorch-triton-rocm..."
 "${VENV_DIR}/bin/pip" install --no-cache-dir --force-reinstall triton==3.4.0 2>&1 | tail -10 || true
 
-# Install amdsmi pip for clean vllm platform detection (fallback patch remains)
-echo "[3/8] Installing amdsmi pip package..."
-"${VENV_DIR}/bin/pip" install --no-cache-dir amdsmi 2>&1 | tail -10 || echo "WARNING: amdsmi pip install failed, HIP fallback patch will cover it"
+# Fix amdsmi: pip 7.0.2 vs system lib 27.0.0 mismatch (undefined amdsmi_set_gpu_clk_range)
+# Grok diagnosis correct — pip wheel from PyPI mismatches ROCm 10 lib. Prefer
+# the amdsmi that ships with the installed ROCm (guaranteed ABI match).
+echo "[3/8] Fixing amdsmi to match system ROCm lib..."
+"${VENV_DIR}/bin/pip" uninstall -y amdsmi 2>&1 | tail -5 || true
+if [[ -d "/opt/rocm/share/amd_smi" ]]; then
+  echo "  Installing amdsmi from /opt/rocm/share/amd_smi (matches libamd_smi.so)..."
+  "${VENV_DIR}/bin/pip" install --no-cache-dir /opt/rocm/share/amd_smi 2>&1 | tail -10 || echo "WARNING: amdsmi from /opt/rocm/share/amd_smi failed"
+else
+  echo "  /opt/rocm/share/amd_smi not found — skipping pip amdsmi, will rely on HIP fallback patch (vllm/platforms/__init__.py:411)"
+fi
+# Verify amdsmi import (must not crash torch)
+if ! "${VENV_DIR}/bin/python" -c "import amdsmi; print('amdsmi OK', amdsmi.__version__ if hasattr(amdsmi,'__version__') else '')" 2>&1 | tail -5; then
+  echo "WARNING: amdsmi still broken — uninstalling to let torch fallback (ModuleNotFoundError path)"
+  "${VENV_DIR}/bin/pip" uninstall -y amdsmi 2>&1 | tail -5 || true
+fi
+# Final check: torch import must succeed (this is what vllm_rocm_accel_shim.pth does at startup)
+echo "  Verifying torch+amdsmi import..."
+"${VENV_DIR}/bin/python" -c "import torch; print('torch', torch.__version__, 'hip', torch.version.hip, 'cuda_available', torch.cuda.is_available())" 2>&1 | tail -10 || echo "WARNING: torch cuda import check failed"
 
 # Apply ROCm compatibility patches (same as checkpoint.md proven fixes)
 echo "[3/8] Applying ROCm compatibility patches..."
@@ -621,7 +641,7 @@ fi
 echo ""
 systemctl status vllm --no-pager 2>&1 | tail -15 || true
 echo ""
-echo "[Bootstrap complete - vllm 0.3.0 (native ROCm, no docker)]"
+echo "[Bootstrap complete - vllm 0.3.2 (native ROCm, no docker)]"
 echo "  vLLM API (OpenAI) : http://<container-ip>:${VLLM_PORT}/v1  (health http://<container-ip>:${VLLM_PORT}/health)"
 echo "  Model             : ${DEFAULT_MODEL_PATH} (served as ${DEFAULT_MODEL_NAME})"
 echo "  Runtime config    : ${VLLM_ENV}  (edit + systemctl restart vllm)"
