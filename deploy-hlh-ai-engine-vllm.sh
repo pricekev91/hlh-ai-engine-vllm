@@ -11,10 +11,10 @@ Usage:
 
 This is the direct Proxmox bootstrap path (no OpenTofu):
 	1) Create privileged LXC 113 (hlh-ai-engine-vllm)
-  2) Configure GPU passthrough (890M gfx1150 only)
-  3) Start container
-  4) Push/run in-container bootstrap script (docker + vllm.service running
-     vllm/vllm-openai-rocm serving /srv/ai/models/Qwen3.5-9B — phase 1)
+    2) Configure GPU passthrough (890M gfx1150 only)
+    3) Start container
+    4) Push/run in-container bootstrap script (native vLLM install + vllm.service running
+       vLLM serving /srv/ai/models/Qwen3.5-9B — phase 1)
 EOF
 }
 
@@ -33,12 +33,10 @@ LXC_GATEWAY="192.168.1.1"
 # ROCm version tracks latest stable — default is latest upstream (10.0.0 2026-08-26); override with env: ROCM_VERSION=7.14.1 ./deploy-hlh-ai-engine-vllm.sh
 # Never pinned — deploy always prints the version it will build (see header/footer) and forwards ROCM_VERSION into the LXC.
 ROCM_VERSION="${ROCM_VERSION:-10.0.0}"
-# Phase 1: vLLM runs as the official docker image (ROCm userspace ships in the image).
-# The host ROCm stack still matters: it provides the amdgpu kernel driver/firmware behind /dev/kfd.
-VLLM_IMAGE="${VLLM_IMAGE:-vllm/vllm-openai-rocm:latest}"
+# Phase 1: vLLM runs natively in LXC (no docker). Host ROCm stack provides amdgpu kernel driver/firmware.
 VLLM_MODEL_DIR="/srv/ai/models"
-VLLM_DEFAULT_MODEL="Qwen3.6-35B-A3B-GPTQ-Int4"
-VLLM_BACKEND="vLLM ROCm docker image (${VLLM_IMAGE}) serving ${VLLM_MODEL_DIR}/${VLLM_DEFAULT_MODEL}"
+VLLM_DEFAULT_MODEL="Qwen3.5-9B"
+VLLM_BACKEND="vLLM ROCm native serving ${VLLM_MODEL_DIR}/${VLLM_DEFAULT_MODEL}"
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -266,7 +264,7 @@ pct create "${LXC_ID}" "${LXC_IMAGE}" \
 	--unprivileged 0 \
 	--onboot 1 \
 	--mp0 "${MODEL_HOST_DIR},mp=${MODEL_LXC_DIR}" \
-	--description "vLLM AI engine (docker ${VLLM_IMAGE}) serving ${VLLM_DEFAULT_MODEL} (qwen3.5-9b), host ROCm ${ROCM_VERSION}, model storage on ${POOL}"
+	--description "vLLM AI engine (native, no docker) serving ${VLLM_DEFAULT_MODEL} (qwen3.5-9b), host ROCm ${ROCM_VERSION}, model storage on ${POOL}"
 
 echo "[3/6] Adding GPU/ROCm passthrough devices..."
 # Only the 890M iGPU (gfx1150): card0 (226:1) + renderD128 (226:128) + kfd (511:0)
@@ -297,16 +295,16 @@ echo "[4/6] Starting LXC ${LXC_ID}..."
 pct start "${LXC_ID}"
 sleep 5
 
-echo "[5/6] Running in-container bootstrap (docker + vLLM image ${VLLM_IMAGE})..."
+echo "[5/6] Running in-container bootstrap (native vLLM install)..."
 pct exec "${LXC_ID}" -- mkdir -p /root/ai-engine-bootstrap
 pct push "${LXC_ID}" "$BOOTSTRAP_SCRIPT" /root/ai-engine-bootstrap/configure-ai-engine-inside-lxc.sh --perms 0755
-pct exec "${LXC_ID}" -- env VLLM_IMAGE="${VLLM_IMAGE}" bash /root/ai-engine-bootstrap/configure-ai-engine-inside-lxc.sh
+pct exec "${LXC_ID}" -- env ROCM_VERSION="${ROCM_VERSION}" VLLM_DEFAULT_MODEL="${VLLM_DEFAULT_MODEL}" bash /root/ai-engine-bootstrap/configure-ai-engine-inside-lxc.sh
 
 echo "[6/6] Deployment complete. LXC ${LXC_ID} (${LXC_NAME}) is running."
 echo "Model storage: ${MODEL_HOST_DIR} (host) <-> ${MODEL_LXC_DIR} (container) on ${POOL}"
-echo "Backend      : ${VLLM_BACKEND} (gfx1150, ROCm HIP in-container)"
+echo "Backend      : ${VLLM_BACKEND} (gfx1150, ROCm HIP native in-container)"
 echo "vLLM API (OpenAI-compatible) : http://192.168.1.13:8000 ( /health /v1/models /v1/chat/completions )"
 echo "Open WebUI                   : NOT configured (phase 10)"
-echo "Runtime config inside LXC    : /etc/vllm.env (image, model path, served name, gpu-mem-util, max-model-len, HSA override)"
+echo "Runtime config inside LXC    : /etc/vllm.env (model path, served name, gpu-mem-util, max-model-len, HSA override)"
 echo "Health: curl -s http://192.168.1.13:8000/health && curl -s http://192.168.1.13:8000/v1/models | head -100"
-echo "Logs:   ssh root@192.168.1.13 'journalctl -u vllm -f'  |  'docker logs -f vllm'"
+echo "Logs:   ssh root@192.168.1.13 'journalctl -u vllm -f'"

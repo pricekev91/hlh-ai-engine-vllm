@@ -1,9 +1,8 @@
 # hlh-ai-engine-vllm
 
-Infrastructure-as-Code for the HLH vLLM inference engine. Deploys **vLLM (official
-`vllm/vllm-openai-rocm` docker image)** as a Proxmox LXC container with AMD GPU
-passthrough (Radeon 890M, gfx1150/Strix Halo), serving local safetensors models
-from the shared `/srv/ai/models` pool.
+Infrastructure-as-Code for the HLH vLLM inference engine. Deploys **native vLLM (no docker)**
+as a Proxmox LXC container with AMD GPU passthrough (Radeon 890M, gfx1150/Strix Halo),
+serving local safetensors models from the shared `/srv/ai/models` pool.
 
 ## Executive Summary
 
@@ -11,16 +10,16 @@ This repository deploys and configures the **engine-vllm** LXC on the HLH Proxmo
 (`192.168.1.10`). It is a sibling of `hlh-ai-engine` (llama.cpp `112` / `192.168.1.12`) and
 `hlh-ai-engine-k80` (CUDA `131`), running the shared AI workload on the high-throughput vLLM engine.
 
-**Phase 1 (current): get vLLM serving.** Open WebUI is deliberately **not** part of the bootstrap
+**Phase 2 (current): native vLLM, no docker.** Open WebUI is deliberately **not** part of the bootstrap
 (anything UI is phase 10).
 
 - LXC `113`, hostname `hlh-ai-engine-vllm`, IP `192.168.1.13` (gw `192.168.1.1`)
-- vLLM runs as a **docker container** from the official ROCm image `vllm/vllm-openai-rocm:latest`
-  (ROCm userspace ships in the image — **no in-LXC ROCm install, no Python venv, no wheel patches**).
-  The host ROCm stack (default `10.0.0`, never pinned) still matters: it provides the `amdgpu`
-  kernel driver/firmware behind `/dev/kfd`.
+- vLLM runs **natively** in the LXC (no docker). ROCm userspace installed in-container
+  (matching host `ROCM_VERSION`, default `10.0.0`, never pinned). Python venv at `/opt/vllm-venv`
+  with vLLM installed via pip with ROCm support. The host ROCm stack still matters:
+  it provides the `amdgpu` kernel driver/firmware behind `/dev/kfd`.
 - GPU: AMD Radeon 890M iGPU (`gfx1150`, `c9:00.0`) — `/dev/kfd` + `/dev/dri/renderD128` +
-  `/dev/dri/card0` passed through; `HSA_OVERRIDE_GFX_VERSION=11.0.0` set inside the container
+  `/dev/dri/card0` passed through; `HSA_OVERRIDE_GFX_VERSION=11.0.0` set in service env
   (the proven override for this vLLM/torch combo on gfx1150 — `11.5.0` gives
   `HIP error: invalid device function`, see `checkpoint.md`)
 - Serves **`/srv/ai/models/Qwen3.5-9B`** (18 GB bf16 safetensors, `qwen3_5` hybrid
@@ -40,7 +39,7 @@ This repository deploys and configures the **engine-vllm** LXC on the HLH Proxmo
 - LXC lifecycle (create, configure, start) on Proxmox `prox01` (`113` privileged `nesting,keyctl`, `48G RAM`, `12 cores`, `64G rootfs` on `RaidZ1-6TB`)
 - GPU passthrough for ROCm (`/dev/dri/card0` `226:0`, `renderD128` `226:128`, `/dev/kfd` `511:0` — 890M `gfx1150` only; K80 nodes intentionally excluded)
 - Model storage mount wiring (`--mp0 /srv/ai/models,mp=/srv/ai/models`)
-- In-container docker install + `vllm.service` running `vllm/vllm-openai-rocm` (runtime config in `/etc/vllm.env`)
+- In-container ROCm userspace install + Python venv + `vllm.service` running native vLLM (runtime config in `/etc/vllm.env`)
 
 **Does not own:**
 - Proxmox host kernel pin (that is `iac-hlh` / `proxmox-boot-tool`)
@@ -55,10 +54,10 @@ Full (re)deploy from the Proxmox host (destroys/recreates LXC `113` from scratch
 ```bash
 ./deploy-hlh-ai-engine-vllm.sh
 # Overrides:
-VLLM_IMAGE=vllm/vllm-openai-rocm:latest ROCM_VERSION=10.0.0 ./deploy-hlh-ai-engine-vllm.sh
+ROCM_VERSION=10.0.0 ./deploy-hlh-ai-engine-vllm.sh
 ```
 
-Reconfigure an existing LXC via Ansible (no recreate — this is the phase-1 path for the live box):
+Reconfigure an existing LXC via Ansible (no recreate — this is the phase-2 path for the live box):
 
 ```bash
 ./configure-hlh-ai-engine-vllm.sh
@@ -70,7 +69,7 @@ Or manually on the LXC:
 ```bash
 # from repo root, on the Proxmox host:
 pct push 113 ansible/files/configure-ai-engine-inside-lxc.sh /root/ai-engine-bootstrap/configure-ai-engine-inside-lxc.sh --perms 0755
-pct exec 113 -- env VLLM_IMAGE=vllm/vllm-openai-rocm:latest bash /root/ai-engine-bootstrap/configure-ai-engine-inside-lxc.sh
+pct exec 113 -- env ROCM_VERSION=10.0.0 bash /root/ai-engine-bootstrap/configure-ai-engine-inside-lxc.sh
 ```
 
 Switch the loaded model (inside the LXC):
@@ -96,11 +95,11 @@ Deployment and configuration are separate phases:
    passthrough (`card0` + `renderD128` + `kfd` only — K80 nodes excluded so ROCm never enumerates
    an unsupported device), checks/upgrades the **host** ROCm if the major mismatches
    (`stable.repo.amd.com` for 10.x, `packages-multi-arch` for 7.x), and pushes
-   `ansible/files/configure-ai-engine-inside-lxc.sh` via `pct push` (`VLLM_IMAGE` forwarded).
+   `ansible/files/configure-ai-engine-inside-lxc.sh` via `pct push` (`ROCM_VERSION` forwarded).
 2. **Configuration**: `ansible/playbooks/hlh-ai-engine-vllm.yml` runs
    `ansible/files/configure-ai-engine-inside-lxc.sh` inside the container:
-   installs docker, writes `/etc/vllm.env` + `/usr/local/bin/vllm-docker-run.sh` + `vllm.service`,
-   pulls the image, starts vLLM, health-probes.
+   installs ROCm userspace, Python venv, vLLM via pip, writes `/etc/vllm.env` + `/usr/local/bin/vllm-run.sh` + `vllm.service`,
+   starts vLLM, health-probes.
 
 ## OpenTofu Module
 
@@ -127,11 +126,12 @@ module "hlh_ai_engine_vllm" {
 |------|-------|
 | LXC | `113` `hlh-ai-engine-vllm` `192.168.1.13/24` `prox01` `RaidZ1-6TB` |
 | vLLM API (OpenAI) | `http://192.168.1.13:8000` (`/health`, `/v1/models`, `/v1/chat/completions`, `/v1/completions`) |
-| vLLM image | `vllm/vllm-openai-rocm:latest` (override: `VLLM_IMAGE` env at bootstrap) |
+| vLLM runtime | Native (Python venv `/opt/vllm-venv`, no docker) |
 | Model storage | `/srv/ai/models` host (RaidZ1-6TB) ↔ `/srv/ai/models` LXC (`mp0`, same path as siblings, `775`) |
 | Default model | `/srv/ai/models/Qwen3.5-9B` (18 GB bf16 safetensors, `qwen3_5` VLM; served as `qwen3.5-9b`) |
 | GPU device | `/dev/kfd` `511:0` + `/dev/dri/renderD128` `226:128` + `/dev/dri/card0` `226:0` (gfx1150 890M only) |
-| Host ROCm | `10.0.0` default never pinned (provides amdgpu kernel driver/firmware; in-container ROCm comes from the docker image) |
+| Host ROCm | `10.0.0` default never pinned (provides amdgpu kernel driver/firmware) |
+| In-LXC ROCm | Userspace installed matching host version (default `10.0.0`) |
 | Open WebUI | **not configured — phase 10** |
 
 ## Repository Layout
@@ -143,7 +143,7 @@ hlh-ai-engine-vllm/
 ├── ansible/
 │   ├── inventories/hlh-ai-engine-vllm.yml
 │   ├── playbooks/hlh-ai-engine-vllm.yml
-│   └── files/configure-ai-engine-inside-lxc.sh  # docker + /etc/vllm.env + vllm-docker-run.sh + vllm.service :8000
+│   └── files/configure-ai-engine-inside-lxc.sh  # ROCm + venv + vLLM + /etc/vllm.env + vllm-run.sh + vllm.service :8000
 ├── opentofu/
 │   ├── main.tf
 │   └── variables.tf
@@ -151,27 +151,25 @@ hlh-ai-engine-vllm/
 ├── 10_ACTIVE.md
 ├── 90_DONE.md
 ├── CHANGELOG.md
-├── checkpoint.md                          # historical: venv-era ROCm debugging (superseded by docker image)
+├── checkpoint.md                          # historical: venv-era ROCm debugging
 ├── vllm-lemonade.sh                       # one-off Lemonade-based installer (experiment, not the deploy path)
 └── README.md
 ```
 
 ## GPU Backend Notes
 
-**vLLM ROCm only, via official docker image.** The `vllm/vllm-openai-rocm` image is a full ROCm
-build (torch+HIP+triton inside the image), which replaces the earlier in-LXC venv path
-(CUDA wheel + `torch.ops._C` shims — see `checkpoint.md` for that debugging history).
+**vLLM ROCm native (no docker).** The bootstrap installs ROCm userspace in the LXC (matching host version),
+creates a Python venv, and installs vLLM via pip with ROCm support. This replaces the earlier
+docker-image approach (`vllm/vllm-openai-rocm`) and the venv-era debugging (see `checkpoint.md`).
 
 - `gfx1150` is community-tier for vLLM ROCm (APU `150e`, UMA ~48 GB + GTT ≈ 68.7 GB total pool).
-- `HSA_OVERRIDE_GFX_VERSION=11.0.0` (set as container env, default in `/etc/vllm.env`) is
+- `HSA_OVERRIDE_GFX_VERSION=11.0.0` (set in service env, default in `/etc/vllm.env`) is
   **mandatory** for the vLLM/torch combo validated on this box. `11.5.0` → `HIP error:
-  invalid device function` at first kernel launch. If a future image ships native gfx1150
+  invalid device function` at first kernel launch. If a future vLLM ships native gfx1150
   kernels, verify and drop the override.
 - `--enforce-eager` is on by default (APU lacks some flash-attention / graph-capture paths).
-- Container flags: `--network host`, `--ipc host`, `--shm-size 16g`, `--device /dev/kfd
-  /dev/dri/renderD128 /dev/dri/card0`, numeric `--group-add` (kfd/dri gids),
-  `--security-opt apparmor=unconfined` (required in privileged LXC), `--security-opt
-  seccomp=unconfined` (KFD ioctl). Model dir mounted read-only at the same path.
+- ROCm compatibility patches applied at bootstrap (torch.accelerator shim, SiluAndMul fallback, vllm_c gating).
+- Service runs as root with GPU devices passed through from host (cgroup2/mount in LXC config).
 
 ## vLLM Tuning Reference
 
@@ -180,19 +178,17 @@ Runtime config lives in **`/etc/vllm.env`** (edit → `systemctl restart vllm`, 
 
 | Var | Default | Description |
 |-----|---------|-------------|
-| `VLLM_IMAGE` | `vllm/vllm-openai-rocm:latest` | Container image |
 | `VLLM_PORT` | `8000` | OpenAI API port |
-| `VLLM_MODEL_DIR` | `/srv/ai/models` | Mount source (host↔LXC, also mounted read-only in container) |
+| `VLLM_MODEL_DIR` | `/srv/ai/models` | Mount source (host↔LXC, also used by vLLM) |
 | `VLLM_MODEL_PATH` | `/srv/ai/models/Qwen3.5-9B` | Local dir or HF id |
 | `VLLM_SERVED_NAME` | `qwen3.5-9b` | Name exposed in `/v1/models` |
 | `VLLM_GPU_MEM_UTIL` | `0.40` | Fraction of the ~68.7 GB GTT pool (weights + KV). Lower to `0.30` if co-tenant 112 needs more |
-| `VLLM_MAX_MODEL_LEN` | `4096` | Context window (262k max of the model won't fit in KV) |
+| `VLLM_MAX_MODEL_LEN` | `131072` | Context window (262k max of the model won't fit in KV) |
 | `HSA_OVERRIDE_GFX_VERSION` | `11.0.0` | gfx1150 kernel target override (see notes) |
-| `VLLM_SHM_SIZE` | `16g` | Container `/dev/shm` |
 | `VLLM_LOG_LEVEL` | `INFO` | vLLM logging level |
 | `VLLM_EXTRA_ARGS` | *(empty)* | Extra `vllm serve` args, e.g. `--max-num-seqs 8 --skip-mm-profiling` |
 
-Fixed `vllm serve` flags (in `/usr/local/bin/vllm-docker-run.sh`): `--host 0.0.0.0`,
+Fixed `vllm serve` flags (in `/usr/local/bin/vllm-run.sh`): `--host 0.0.0.0`,
 `--enforce-eager`, `--trust-remote-code`, `--limit-mm-per-prompt '{"image":1,"video":1}'`
 (qwen3_5 is a VLM), `--mm-processor-cache-gb 1`.
 
@@ -203,11 +199,11 @@ Fixed `vllm serve` flags (in `/usr/local/bin/vllm-docker-run.sh`): `--host 0.0.0
 | vLLM status | `systemctl status vllm` |
 | vLLM health | `curl -s http://127.0.0.1:8000/health` |
 | vLLM models | `curl -s http://127.0.0.1:8000/v1/models` |
-| Container | `docker ps` / `docker logs -f vllm` |
 | GPU (host) | `rocm-smi` on `192.168.1.10` |
+| GPU (LXC) | `rocm-smi` inside LXC (after ROCm install) |
 | Memory gauges | `rocm-smi --showmeminfo vram` (host) + `free -g` (LXC) |
 | Logs vLLM | `journalctl -u vllm -f` |
-| Engine root cause | last `Error` line in the `core.py` traceback of `docker logs vllm` |
+| Engine root cause | last `Error` line in the `core.py` traceback in journalctl |
 | Deployed config | `cat /etc/vllm.env` |
 
 `vllm-switch-model.sh` probes `/health` up to 180 s after restart (18 GB model load from ZFS
@@ -215,13 +211,14 @@ takes several minutes).
 
 ## Gotchas
 
-- **`HSA_OVERRIDE_GFX_VERSION=11.0.0`** is mandatory with the validated image/torch combo (§notes).
+- **`HSA_OVERRIDE_GFX_VERSION=11.0.0`** is mandatory with the validated vLLM/torch combo (§notes).
 - **Memory**: vLLM claims `VLLM_GPU_MEM_UTIL` × ~68.7 GB GTT at startup (weights + KV pre-alloc).
   `0.40` ≈ 27 GB. Sibling `112` (llama.cpp) shares the same physical RAM — keep an eye on
   `free -g` / host `rocm-smi`.
 - **Co-tenancy**: `112` and `113` share `c9:00.0`. This repo never stops `112`.
 - **K80s** on this host are not recognized by the driver and are out of scope (see `hlh-ai-engine-k80` / future V100/MI50 shopping).
-- Engine restart cycle ≈ 2–5 min (18 GB weights off ZFS + container start).
+- Engine restart cycle ≈ 2–5 min (18 GB weights off ZFS + Python import + model load).
+- ROCm version in LXC must match host major version (handled by deploy script).
 
 ## Governance
 

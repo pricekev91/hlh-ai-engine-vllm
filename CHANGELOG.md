@@ -5,6 +5,33 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-09-18
+
+### Changed
+
+- **Phase 2 refactor: REMOVED DOCKER. vLLM now runs natively in LXC** (no docker container layer). Bootstrap installs ROCm userspace in-container (matching host ROCM_VERSION), Python venv at `/opt/vllm-venv`, vLLM via pip with ROCm support. `vllm.service` `ExecStart` is now `/usr/local/bin/vllm-run.sh` (native python -m vllm.entrypoints.openai.api_server).
+- `deploy-hlh-ai-engine-vllm.sh` no longer references docker; forwards `ROCM_VERSION` and `VLLM_DEFAULT_MODEL` to bootstrap; backend description updated to "vLLM ROCm native".
+- Runtime config `/etc/vllm.env` simplified (removed `VLLM_IMAGE`, `VLLM_SHM_SIZE`, docker-specific vars); added native ROCm env vars.
+- Default model confirmed as **`/srv/ai/models/Qwen3.5-9B`** (18 GB bf16 safetensors, `qwen3_5` VLM, served as `qwen3.5-9b`).
+- `HSA_OVERRIDE_GFX_VERSION=11.0.0` remains mandatory (proven override for gfx1150).
+- `VLLM_MAX_MODEL_LEN` increased to `131072` (was 4096) to support longer contexts.
+
+### Removed
+
+- Docker installation and `docker pull`/`docker run` logic from bootstrap.
+- `vllm-docker-run.sh` runner; replaced by `vllm-run.sh` (native).
+- `--security-opt apparmor=unconfined`, `--security-opt seccomp=unconfined`, `--group-add`, `--ipc host`, `--shm-size` docker flags.
+- `VLLM_IMAGE` env var and docker image references throughout.
+- Open WebUI remains deferred to **phase 10**.
+
+### Added
+
+- In-container ROCm userspace installation (matching host major version via `stable.repo.amd.com` for 10.x or `packages-multi-arch` for 7.x).
+- Python venv creation at `/opt/vllm-venv` with torch (ROCm index) and vLLM[rocm] installation.
+- ROCm compatibility patches applied at bootstrap: torch.accelerator shim, SiluAndMul native fallback, vllm_c provider gating (from `checkpoint.md` proven fixes).
+- `README.md` fully rewritten for native architecture (runtime contract, tuning table, health checks, gotchas).
+- `deploy-hlh-ai-engine-vllm.sh` usage text updated for native path.
+
 ## [0.2.0] - 2026-09-16
 
 ### Changed
