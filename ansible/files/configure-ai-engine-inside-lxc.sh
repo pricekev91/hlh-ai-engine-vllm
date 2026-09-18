@@ -18,6 +18,11 @@
 
 set -euo pipefail
 
+# --- CLEANUP: Stop any existing vllm service to avoid stale ExecStart ---
+systemctl stop vllm 2>/dev/null || true
+systemctl disable vllm 2>/dev/null || true
+systemctl daemon-reload 2>/dev/null || true
+
 # --- CONFIGURABLE (env-overridable, pushed via pct exec env ...) ---
 ROCM_VERSION="${ROCM_VERSION:-10.0.0}"
 VLLM_PORT="${VLLM_PORT:-8000}"
