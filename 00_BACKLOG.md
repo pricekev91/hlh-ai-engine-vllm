@@ -2,7 +2,14 @@
 
 Items for future implementation. These are human-entered ideas not yet reflected in the codebase.
 
-## GPU / ROCm
+## GPU / ROCm — P5 proper ROCm build (sustainable fix)
+
+- **P5: Replace CUDA-wheel shims with real ROCm build.** Current native pip `vllm 0.29.0` CUDA wheel requires perpetual `torch.ops._C` shims (`get_cuda_view`, `rms_norm`, `silu_and_mul`, `target_info`, etc.) — per review, unsustainable. Options:
+  - **[A] Docker:** `vllm/vllm-openai-rocm:latest` (or ROCm 6.4/7.0 tag) — `vllm.service` runs `docker run --device /dev/kfd --device /dev/dri/renderD128 --network host` with `/srv/ai/models` bind; known-good from `0.2.0` before `0.3.0` phase-2 revert. Pros: ships `vllm._rocm_C` compiled, no shim. Cons: docker in privileged LXC, 64G rootfs needs dedicated subvolume (see Docker storage below).
+  - **[B] Source build inside LXC:** `git clone vllm 0.29.0; USE_ROCM=1 MAX_JOBS=12 PYTORCH_ROCM_ARCH=gfx1150 pip install --no-build-isolation -e .` — produces `vllm._rocm_C`/`_C` locally with HIP, eliminates `AttributeError: _C has no attribute X` family. Needs `hipcc`, `rocm-dev`, `~30-60 min` on 12c/48G. Set `HSA_OVERRIDE_GFX_VERSION=11.0.0` still required.
+- Decision pending after `0.3.3` quick test — if `rms_norm` fix still hits next `_C` op, switch to P5.
+
+## GPU / ROCm (other)
 
 - Track ROCm version compatibility matrix across Proxmox kernel updates (10.0.0 default never pinned, host must match LXC)
 - Add GPU memory utilization monitoring for vLLM (`gpu_memory_utilization` vs `rocm-smi` VRAM%)
