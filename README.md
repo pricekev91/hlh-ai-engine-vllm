@@ -178,7 +178,7 @@ docker-image approach (`vllm/vllm-openai-rocm`) and the venv-era debugging (see 
   `get_cuda_view_from_cpu_tensor`); V2 runner crashes at `vllm/utils/torch_utils.py:916` → `vllm/v1/worker/gpu/buffer_utils.py:50`
   (see `checkpoint.md` §5.4). Set in `/etc/vllm.env`, `vllm-run.sh`, and `vllm.service`.
 - `--enforce-eager` is on by default (APU lacks some flash-attention / graph-capture paths).
-- ROCm compatibility patches applied at bootstrap (torch.accelerator shim, SiluAndMul fallback, vllm_c gating, triton 3.4.0 pin, amdsmi pip).
+- ROCm compatibility patches applied at bootstrap (torch.accelerator shim, SiluAndMul fallback, vllm_c gating with native fallback for `rms_norm`, triton `target_info`/`constexpr_function` shim, amdsmi from `/opt/rocm/share/amd_smi`).
 - Service runs as root with GPU devices passed through from host (cgroup2/mount in LXC config).
 
 ## vLLM Tuning Reference

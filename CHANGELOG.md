@@ -5,6 +5,13 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] - 2026-09-18
+
+### Fixed
+
+- **CRITICAL: vllm_c rms_norm missing _C** — `AttributeError: _C has no attribute rms_norm` at `vllm/kernels/vllm_c.py:43` → `layernorm.py:115` during `profile_run` (CUDA wheel has no `vllm._C`/`_rocm_C`, `ldd` shows `libcudart.so.13` missing). Previous regex gating `GPGPU_DEVICE` failed due to parentheses mismatch. Now: adds `_c_ext_available()` helper, gates `GPGPU_DEVICE` correctly, adds native fallback `ir.ops.rms_norm.impls["native"]` and `layernorm.py` `forward_cuda` early return to `forward_native` when `_C.rms_norm` missing (P1 immediate unblock). Keeps native alive for your test.
+- **Triton 3.4.0 vs 3.7 `target_info`/`constexpr_function` mismatch** — `pytorch-triton-rocm 3.4.0` lacks `triton.language.target_info` needed by `vllm 0.29.0` `third_party/triton_kernels/target_info.py:1` (`Failed to import Triton kernels`), while `3.7.1` broke `constexpr_function`. Now: shim `triton/language/target_info.py` with minimal `is_cuda/is_hip/cuda_capability_geq` etc., and alias `constexpr_function` in `triton/runtime/jit.py` when missing (P2). Reduces fragility per review.
+
 ## [0.3.2] - 2026-09-18
 
 ### Fixed

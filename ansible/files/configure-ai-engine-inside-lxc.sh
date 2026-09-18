@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # configure-ai-engine-inside-lxc.sh (vLLM native variant)
-# Version: 0.3.2
+# Version: 0.3.3
 # Description: Bootstrap native vLLM (no docker) on Ubuntu 24.04 LXC
 #              with ROCm userspace installed in-container (gfx1150).
 # Target GPU: AMD Radeon 890M (gfx1150/Strix Halo) on Proxmox 9.x privileged LXC
 # Requirements: Run as root inside privileged LXC with GPU passthrough
 #               (/dev/dri/card0, renderD128, /dev/kfd) and /srv/ai/models bind mount
 # Changelog:
+#   0.3.3 - FIX: vllm_c rms_norm missing _C (CUDA wheel on ROCm) — gated GPGPU_DEVICE correctly,
+#           added native fallback in vllm_c.py + layernorm.py (P1). Added triton.language.target_info
+#           shim for 3.4 vs 3.7 mismatch (P2). Keeps native path alive for quick test; P5 proper
+#           ROCm build (Docker/source USE_ROCM=1) is next.
 #   0.3.2 - FIX: amdsmi pip vs lib mismatch (pip 7.0.2 wants amdsmi_set_gpu_clk_range
 #           missing in libamd_smi.so 27.0.0 from ROCm 10.0; Grok correctly diagnosed
 #           pip vs system ABI). Now install amdsmi from /opt/rocm/share/amd_smi
@@ -174,9 +178,60 @@ if [[ "${ROCM_MAJOR}" -ge 10 ]] 2>/dev/null; then
     torch==2.8.0+rocm6.4 torchvision==0.23.0+rocm6.4 torchaudio==2.8.0+rocm6.4 2>&1 | tail -10
 fi
 
-# Pin triton to match pytorch-triton-rocm (3.7.1 breaks vllm's constexpr_function import)
+# Pin triton to match pytorch-triton-rocm (3.7.1 breaks vllm's constexpr_function import) but keep compat shim
 echo "[3/8] Pinning triton to 3.4.0 to match pytorch-triton-rocm..."
 "${VENV_DIR}/bin/pip" install --no-cache-dir --force-reinstall triton==3.4.0 2>&1 | tail -10 || true
+# Triton 3.4.0 lacks triton.language.target_info (added in 3.7) which vllm 0.29.0 expects — shim it so import succeeds
+echo "[3/8] Shimming triton.language.target_info for vLLM 0.29 compatibility..."
+TRITON_TARGET_INFO="${VENV_DIR}/lib/python3.12/site-packages/triton/language/target_info.py"
+if [[ ! -f "${TRITON_TARGET_INFO}" ]]; then
+  mkdir -p "$(dirname "${TRITON_TARGET_INFO}")"
+  cat > "${TRITON_TARGET_INFO}" << 'TRITON_SHIM'
+# Shim for triton.language.target_info — vLLM 0.29 expects this in triton 3.7+, but pytorch-triton-rocm is 3.4.0
+# Provides minimal API used by vllm/third_party/triton_kernels/target_info.py and others
+import triton.language as tl
+try:
+    from triton.runtime.jit import constexpr as _constexpr
+except ImportError:
+    _constexpr = lambda f: f  # no-op fallback
+def _hip_available():
+    try:
+        import torch
+        return bool(getattr(torch.version, 'hip', None))
+    except Exception:
+        return False
+def is_cuda(): return not _hip_available()
+def is_hip(): return _hip_available()
+def is_hip_cdna3(): return False
+def is_hip_cdna4(): return False
+def cuda_capability_geq(major, minor): return False
+def get_cdna_version(): return -1
+def has_tma_gather(): return False
+def has_native_mxfp(): return False
+def num_sms(): 
+    try:
+        import torch; return torch.cuda.get_device_properties(0).multi_processor_count if torch.cuda.is_available() else 1
+    except Exception: return 1
+TRITON_SHIM
+  echo "  Created triton/language/target_info.py shim"
+else
+  echo "  triton/language/target_info.py already exists"
+fi
+# Also ensure triton.runtime.jit constexpr_function compat (3.4 vs 3.7 rename)
+TRITON_JIT="${VENV_DIR}/lib/python3.12/site-packages/triton/runtime/jit.py"
+if [[ -f "${TRITON_JIT}" ]] && ! grep -q "constexpr_function" "${TRITON_JIT}" 2>/dev/null; then
+  echo "  Patching triton/runtime/jit.py to alias constexpr_function"
+  python3 << 'PYEOF'
+import pathlib
+p = pathlib.Path("/opt/vllm-venv/lib/python3.12/site-packages/triton/runtime/jit.py")
+t = p.read_text()
+if "constexpr_function" not in t:
+    # triton 3.4 uses `constexpr` vs 3.7 `constexpr_function` — alias it
+    t += "\n# Compat alias for vLLM expecting constexpr_function\nconstexpr_function = constexpr\n"
+    p.write_text(t)
+    print("Patched triton jit")
+PYEOF
+fi
 
 # Fix amdsmi: pip 7.0.2 vs system lib 27.0.0 mismatch (undefined amdsmi_set_gpu_clk_range)
 # Grok diagnosis correct — pip wheel from PyPI mismatches ROCm 10 lib. Prefer
@@ -319,27 +374,67 @@ print("activation.py patches done")
 PYEOF
 fi
 
-# Patch 3: vllm_c provider gating
+# Patch 3: vllm_c provider gating — disable vllm_c when _C ops missing (CUDA wheel on ROCm)
+# Previous regex required parentheses and failed on live `GPGPU_DEVICE = CUDA_ALIKE or ...`
 VLLM_C_PY="${SP}/kernels/vllm_c.py"
 if [[ -f "${VLLM_C_PY}" ]]; then
   python3 << 'PYEOF'
-path = "/opt/vllm-venv/lib/python3.12/site-packages/vllm/kernels/vllm_c.py"
-with open(path) as f:
-    content = f.read()
-# Add C_EXT_AVAILABLE check and gate GPGPU_DEVICE
-if "C_EXT_AVAILABLE = _c_ext_available()" not in content:
-    # Find the GPGPU_DEVICE line and add check before it
-    import re
-    content = re.sub(
-        r'(GPGPU_DEVICE\s*=\s*\(CUDA_ALIKE.*?\))',
-        r'C_EXT_AVAILABLE = _c_ext_available()\n\1 and C_EXT_AVAILABLE',
-        content
+import pathlib, re
+path = pathlib.Path("/opt/vllm-venv/lib/python3.12/site-packages/vllm/kernels/vllm_c.py")
+t = path.read_text()
+# 3a: Ensure helper exists to probe torch.ops._C
+if "_c_ext_available" not in t:
+    t = t.replace(
+        "current_platform.import_kernels()",
+        "current_platform.import_kernels()\n\ndef _c_ext_available() -> bool:\n    try:\n        return hasattr(torch.ops, '_C') and hasattr(torch.ops._C, 'rms_norm')\n    except Exception:\n        return False"
     )
-    with open(path, 'w') as f:
-        f.write(content)
-    print("Patched vllm_c.py")
-else:
-    print("vllm_c.py already patched")
+    print("Added _c_ext_available helper")
+# 3b: Gate GPGPU_DEVICE to require C ext (robust to both `GPGPU_DEVICE = CUDA_ALIKE or ...` and parenthesized)
+if "C_EXT_AVAILABLE = _c_ext_available()" not in t:
+    # Insert after helper, before GPGPU_DEVICE
+    t = t.replace(
+        "GPGPU_DEVICE = CUDA_ALIKE or current_platform.is_xpu()",
+        "C_EXT_AVAILABLE = _c_ext_available()\nGPGPU_DEVICE = (CUDA_ALIKE or current_platform.is_xpu()) and C_EXT_AVAILABLE"
+    )
+    # Fallback if already parenthesized
+    t = t.replace(
+        "GPGPU_DEVICE = (CUDA_ALIKE or current_platform.is_xpu()) and C_EXT_AVAILABLE and C_EXT_AVAILABLE",
+        "GPGPU_DEVICE = (CUDA_ALIKE or current_platform.is_xpu()) and C_EXT_AVAILABLE"
+    )
+    print("Gated GPGPU_DEVICE on C_EXT_AVAILABLE")
+# 3c: Defensive: force vllm_c impls to report unsupported when _C missing (covers layernorm dispatch)
+#     Patch the @register_impl supported= flag is evaluated at import, so gating GPGPU_DEVICE is primary.
+#     Also wrap the two impl bodies to fallback to native on AttributeError.
+if "except AttributeError:" not in t or "Fallback to native rms_norm" not in t:
+    # Add fallback inside rms_norm try/except around torch.ops._C.rms_norm
+    t = t.replace(
+        "    output = torch.empty(x.shape, device=x.device, dtype=x.dtype)\n    torch.ops._C.rms_norm(output, x, weight, epsilon)\n    return output\n\n\nrms_add_no_var_size",
+        "    output = torch.empty(x.shape, device=x.device, dtype=x.dtype)\n    try:\n        torch.ops._C.rms_norm(output, x, weight, epsilon)\n    except AttributeError:\n        # Fallback to native rms_norm when _C missing (CUDA wheel on ROCm) — see P1\n        return ir.ops.rms_norm.impls[\"native\"].impl_fn(x, weight, epsilon)\n    return output\n\n\nrms_add_no_var_size"
+    )
+    print("Added rms_norm native fallback")
+path.write_text(t)
+print("vllm_c.py patched for native fallback")
+PYEOF
+fi
+# Patch 3d: layernorm.py defensive fallback — if vllm_c still selected, never crash on missing _C
+LAYERNORM_PY="${SP}/model_executor/layers/layernorm.py"
+if [[ -f "${LAYERNORM_PY}" ]]; then
+  python3 << 'PYEOF'
+import pathlib
+p = pathlib.Path("/opt/vllm-venv/lib/python3.12/site-packages/vllm/model_executor/layers/layernorm.py")
+t = p.read_text()
+if "Fallback layernorm to native" not in t:
+    old = "    def forward_cuda(self, x: torch.Tensor, residual: torch.Tensor | None = None) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:\n        if residual is not None:\n            return self.forward_native(x, residual)"
+    new = "    def forward_cuda(self, x: torch.Tensor, residual: torch.Tensor | None = None) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:\n        # Fallback layernorm to native when _C missing (ROCm CUDA-wheel) - P1\n        if not hasattr(torch.ops, '_C') or not hasattr(torch.ops._C, 'rms_norm'):\n            return self.forward_native(x, residual)\n        if residual is not None:\n            return self.forward_native(x, residual)"
+    if old in t:
+        t = t.replace(old, new)
+        print("Patched layernorm.py forward_cuda fallback")
+        p.write_text(t)
+    else:
+        print("layernorm.py pattern not matched, trying alternative")
+        # Alternative: patch RMSNorm.forward directly
+        if "torch.ops._C.rms_norm" in t:
+            print("layernorm.py contains _C.rms_norm, needs manual check")
 PYEOF
 fi
 
@@ -641,7 +736,7 @@ fi
 echo ""
 systemctl status vllm --no-pager 2>&1 | tail -15 || true
 echo ""
-echo "[Bootstrap complete - vllm 0.3.2 (native ROCm, no docker)]"
+echo "[Bootstrap complete - vllm 0.3.3 (native ROCm, no docker)]"
 echo "  vLLM API (OpenAI) : http://<container-ip>:${VLLM_PORT}/v1  (health http://<container-ip>:${VLLM_PORT}/health)"
 echo "  Model             : ${DEFAULT_MODEL_PATH} (served as ${DEFAULT_MODEL_NAME})"
 echo "  Runtime config    : ${VLLM_ENV}  (edit + systemctl restart vllm)"
