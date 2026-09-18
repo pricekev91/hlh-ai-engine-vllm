@@ -109,26 +109,14 @@ apt-get update -o Acquire::Check-Valid-Until=false 2>&1 | tee /tmp/rocm-apt-upda
 
 # Install ROCm userspace packages (minimal set for vLLM)
 echo "  Installing ROCm userspace packages..."
-if [[ "${ROCM_MAJOR}" -ge 10 ]] 2>/dev/null; then
-  apt-get install -y --no-install-recommends \
-    "amdrocm${ROCM_MM}" \
-    "amdrocm-core${ROCM_MM}" \
-    "hip-runtime-amd${ROCM_MM}" \
-    "rocm-llvm${ROCM_MM}" \
-    "rocm-gdb${ROCM_MM}" \
-    "rocminfo${ROCM_MM}" \
-    "rocm-smi${ROCM_MM}" \
-    "libamd-smi${ROCM_MM}" 2>&1 || true
-else
-  apt-get install -y --no-install-recommends \
-    "amdrocm${ROCM_MM}" \
-    "amdrocm-core${ROCM_MM}" \
-    "hip-runtime-amd${ROCM_MM}" \
-    "rocm-llvm${ROCM_MM}" \
-    "rocminfo" \
-    "rocm-smi" \
-    "libamd-smi" 2>&1 || true
-fi
+# Package names don't have version suffix in name; version is in package version
+apt-get install -y --no-install-recommends \
+  amdrocm amdrocm-core \
+  hipcc libhiprtc-builtins5 \
+  amdrocm-llvm \
+  rocminfo \
+  rocm-smi \
+  amdrocm-amdsmi 2>&1 || true
 
 # Add ld.so.conf for ROCm libs
 echo "/opt/rocm-${ROCM_MM}/lib" > /etc/ld.so.conf.d/rocm.conf 2>/dev/null || echo "/opt/rocm/lib" > /etc/ld.so.conf.d/rocm.conf
@@ -146,11 +134,12 @@ python3 -m venv "${VENV_DIR}"
 
 # Install torch with ROCm support first
 echo "[3/8] Installing PyTorch with ROCm ${ROCM_MM}..."
+# Pin to known ROCm-compatible version (from checkpoint.md: torch 2.8.0+rocm6.4 works)
+# vLLM 0.29.0 may require newer torch, but ROCm builds lag. Use 2.8.0+rocm6.4 for ROCm 10.x
 if [[ "${ROCM_MAJOR}" -ge 10 ]] 2>/dev/null; then
-  # ROCm 10.x uses torch 2.5+ with ROCm 6.x
   "${VENV_DIR}/bin/pip" install --no-cache-dir \
     --index-url https://download.pytorch.org/whl/rocm6.4 \
-    torch torchvision torchaudio 2>&1 | tail -10
+    torch==2.8.0+rocm6.4 torchvision==0.23.0+rocm6.4 torchaudio==2.8.0+rocm6.4 2>&1 | tail -10
 else
   # ROCm 7.x
   "${VENV_DIR}/bin/pip" install --no-cache-dir \
@@ -168,51 +157,54 @@ echo "[3/8] Applying ROCm compatibility patches..."
 SP="${VENV_DIR}/lib/python3.12/site-packages/vllm"
 
 # Patch 1: torch.accelerator shim for ROCm
-cat > "${VENV_DIR}/lib/python3.12/site-packages/vllm_rocm_accel_shim.py" << 'SHIM'
-# vllm_rocm_accel_shim.py - backfill torch.accelerator on ROCm builds
+python3 << 'PYEOF'
+shim_content = '''# vllm_rocm_accel_shim.py - backfill torch.accelerator on ROCm builds
 # vLLM 0.29+ calls torch.accelerator.* which are CUDA-only in torch 2.8+rocm
 import torch
-if hasattr(torch, 'accelerator'):
-    return
-class _AcceleratorShim:
-    @staticmethod
-    def empty_cache():
-        if hasattr(torch.cuda, 'empty_cache'):
-            torch.cuda.empty_cache()
-    @staticmethod
-    def memory_stats(device=None):
-        if hasattr(torch.cuda, 'memory_stats'):
-            return torch.cuda.memory_stats(device)
-        return {}
-    @staticmethod
-    def memory_allocated(device=None):
-        if hasattr(torch.cuda, 'memory_allocated'):
-            return torch.cuda.memory_allocated(device)
-        return 0
-    @staticmethod
-    def max_memory_allocated(device=None):
-        if hasattr(torch.cuda, 'max_memory_allocated'):
-            return torch.cuda.max_memory_allocated(device)
-        return 0
-    @staticmethod
-    def memory_reserved(device=None):
-        if hasattr(torch.cuda, 'memory_reserved'):
-            return torch.cuda.memory_reserved(device)
-        return 0
-    @staticmethod
-    def reset_peak_memory_stats(device=None):
-        if hasattr(torch.cuda, 'reset_peak_memory_stats'):
-            torch.cuda.reset_peak_memory_stats(device)
-    @staticmethod
-    def get_memory_info(device=None):
-        if hasattr(torch.cuda, 'mem_get_info'):
-            return torch.cuda.mem_get_info(device)
-        return (0, 0)
-    @staticmethod
-    def empty_host_cache():
-        pass
-torch.accelerator = _AcceleratorShim()
-SHIM
+if not hasattr(torch, 'accelerator'):
+    class _AcceleratorShim:
+        @staticmethod
+        def empty_cache():
+            if hasattr(torch.cuda, 'empty_cache'):
+                torch.cuda.empty_cache()
+        @staticmethod
+        def memory_stats(device=None):
+            if hasattr(torch.cuda, 'memory_stats'):
+                return torch.cuda.memory_stats(device)
+            return {}
+        @staticmethod
+        def memory_allocated(device=None):
+            if hasattr(torch.cuda, 'memory_allocated'):
+                return torch.cuda.memory_allocated(device)
+            return 0
+        @staticmethod
+        def max_memory_allocated(device=None):
+            if hasattr(torch.cuda, 'max_memory_allocated'):
+                return torch.cuda.max_memory_allocated(device)
+            return 0
+        @staticmethod
+        def memory_reserved(device=None):
+            if hasattr(torch.cuda, 'memory_reserved'):
+                return torch.cuda.memory_reserved(device)
+            return 0
+        @staticmethod
+        def reset_peak_memory_stats(device=None):
+            if hasattr(torch.cuda, 'reset_peak_memory_stats'):
+                torch.cuda.reset_peak_memory_stats(device)
+        @staticmethod
+        def get_memory_info(device=None):
+            if hasattr(torch.cuda, 'mem_get_info'):
+                return torch.cuda.mem_get_info(device)
+            return (0, 0)
+        @staticmethod
+        def empty_host_cache():
+            pass
+    torch.accelerator = _AcceleratorShim()
+'''
+with open("/opt/vllm-venv/lib/python3.12/site-packages/vllm_rocm_accel_shim.py", "w") as f:
+    f.write(shim_content)
+print("Wrote vllm_rocm_accel_shim.py")
+PYEOF
 
 # Create .pth to auto-load shim
 echo "import vllm_rocm_accel_shim" > "${VENV_DIR}/lib/python3.12/site-packages/vllm_rocm_accel_shim.pth"
@@ -313,13 +305,15 @@ cat > "${RUNNER}" << 'RUNNER'
 set -euo pipefail
 set -a; . /etc/vllm.env; set +a
 
-# Environment for ROCm
+# Environment for ROCm - use direct paths to avoid alternatives/mount namespace issues
 export HSA_OVERRIDE_GFX_VERSION="${HSA_OVERRIDE_GFX_VERSION}"
 export VLLM_LOGGING_LEVEL="${VLLM_LOG_LEVEL}"
 export HF_HUB_CACHE="/srv/ai/models/.hf-cache"
 export PYTHONPATH="/opt/vllm-venv/lib/python3.12/site-packages:${PYTHONPATH:-}"
-export PATH="/opt/vllm-venv/bin:${PATH}"
-export LD_LIBRARY_PATH="/opt/rocm/lib:/opt/rocm/lib64:${LD_LIBRARY_PATH:-}"
+export PATH="/opt/vllm-venv/bin:/opt/rocm/core-10.0/bin:${PATH}"
+export LD_LIBRARY_PATH="/opt/rocm/core-10.0/lib:/opt/rocm/core-10.0/lib64:${LD_LIBRARY_PATH:-}"
+export ROCM_PATH="/opt/rocm/core-10.0"
+export HIP_PATH="/opt/rocm/core-10.0"
 
 # vLLM serve arguments
 ARGS=(
