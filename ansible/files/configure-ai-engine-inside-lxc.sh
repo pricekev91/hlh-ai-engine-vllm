@@ -147,10 +147,17 @@ else
     torch torchvision torchaudio 2>&1 | tail -10
 fi
 
-# Install vLLM with ROCm support
+# Install vLLM with ROCm support (may overwrite torch — force ROCm torch back after)
 echo "[3/8] Installing vLLM with ROCm support..."
 "${VENV_DIR}/bin/pip" install --no-cache-dir \
   vllm[rocm] 2>&1 | tail -10
+# vLLM 0.29 pulls CUDA torch 2.13 — force ROCm torch back
+if [[ "${ROCM_MAJOR}" -ge 10 ]] 2>/dev/null; then
+  echo "[3/8] Re-forcing ROCm torch 2.8.0+rocm6.4 (vLLM overwrites with CUDA)..."
+  "${VENV_DIR}/bin/pip" install --no-cache-dir --force-reinstall \
+    --index-url https://download.pytorch.org/whl/rocm6.4 \
+    torch==2.8.0+rocm6.4 torchvision==0.23.0+rocm6.4 torchaudio==2.8.0+rocm6.4 2>&1 | tail -10
+fi
 
 # Apply ROCm compatibility patches (same as checkpoint.md proven fixes)
 echo "[3/8] Applying ROCm compatibility patches..."
