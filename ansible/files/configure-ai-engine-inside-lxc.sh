@@ -268,6 +268,129 @@ else:
 PYEOF
 fi
 
+# Patch 4: libtorch_cuda.so -> libtorch_hip.so symlink (ROCm torch lacks CUDA lib but vLLM tvm_ffi expects it)
+echo "[3/8] Creating libtorch_cuda symlink for ROCm..."
+if [[ -f "${VENV_DIR}/lib/python3.12/site-packages/torch/lib/libtorch_hip.so" ]]; then
+  ln -sf "${VENV_DIR}/lib/python3.12/site-packages/torch/lib/libtorch_hip.so" "${VENV_DIR}/lib/python3.12/site-packages/torch/lib/libtorch_cuda.so" 2>&1 || true
+  echo "  Linked libtorch_hip.so -> libtorch_cuda.so"
+fi
+
+# Patch 5: torch_c_dlpack_ext fallback to cpu when cuda variant missing
+python3 << 'PYEOF'
+import pathlib
+p = pathlib.Path('/opt/vllm-venv/lib/python3.12/site-packages/torch_c_dlpack_ext/core.py')
+t = p.read_text()
+old = '''    lib_path = (
+        Path(__file__).parent
+        / f"libtorch_c_dlpack_addon_torch{version.major}{version.minor}-{suffix}.{extension}"
+    )
+    if not lib_path.exists() or not lib_path.is_file():
+        raise ImportError("No matching prebuilt torch c dlpack extension")
+    lib = ctypes.CDLL(str(lib_path))'''
+new = '''    lib_path = (
+        Path(__file__).parent
+        / f"libtorch_c_dlpack_addon_torch{version.major}{version.minor}-{suffix}.{extension}"
+    )
+    if not lib_path.exists() or not lib_path.is_file():
+        suffix_fallback = "cpu"
+        lib_path = Path(__file__).parent / f"libtorch_c_dlpack_addon_torch{version.major}{version.minor}-{suffix_fallback}.{extension}"
+        if not lib_path.exists() or not lib_path.is_file():
+            raise ImportError("No matching prebuilt torch c dlpack extension")
+    try:
+        lib = ctypes.CDLL(str(lib_path))
+    except OSError as e:
+        if suffix == "cuda":
+            lib_path_cpu = Path(__file__).parent / f"libtorch_c_dlpack_addon_torch{version.major}{version.minor}-cpu.{extension}"
+            lib = ctypes.CDLL(str(lib_path_cpu))
+        else:
+            raise'''
+if old in t:
+    t = t.replace(old, new)
+    p.write_text(t)
+    print('Patched torch_c_dlpack_ext/core.py')
+else:
+    print('torch_c_dlpack_ext already patched or pattern not found')
+PYEOF
+
+# Patch 6: tvm_ffi make torch_c_dlpack optional (ROCm: don't fail import if cuda lib missing)
+python3 << 'PYEOF'
+import pathlib
+p = pathlib.Path('/opt/vllm-venv/lib/python3.12/site-packages/tvm_ffi/_optional_torch_c_dlpack.py')
+t = p.read_text()
+if 'except Exception as e:' not in t or '_LIB = None' not in t:
+    old = '_LIB = load_torch_c_dlpack_extension()  # keep a reference to the loaded shared library'
+    new = '''try:
+        _LIB = load_torch_c_dlpack_extension()  # keep a reference to the loaded shared library
+    except Exception as e:
+        print(f"[warn] tvm_ffi torch_c_dlpack load failed (ROCm fallback): {e}")
+        _LIB = None'''
+    # handle indented version
+    if '    _LIB = load_torch_c_dlpack_extension()' in t:
+        old = '    _LIB = load_torch_c_dlpack_extension()  # keep a reference to the loaded shared library'
+        new = '''    try:
+        _LIB = load_torch_c_dlpack_extension()  # keep a reference to the loaded shared library
+    except Exception as e:
+        print(f"[warn] tvm_ffi torch_c_dlpack load failed (ROCm fallback): {e}")
+        _LIB = None'''
+    if old in t:
+        t = t.replace(old, new)
+        # fix double indent if needed
+        t = t.replace('    try:\n        _LIB', '    try:\n        _LIB')
+        p.write_text(t)
+        print('Patched tvm_ffi/_optional_torch_c_dlpack.py')
+    else:
+        print('tvm_ffi pattern not found')
+else:
+    print('tvm_ffi already patched')
+PYEOF
+# fix indentation if botched
+python3 << 'PYEOF'
+import pathlib
+p = pathlib.Path('/opt/vllm-venv/lib/python3.12/site-packages/tvm_ffi/_optional_torch_c_dlpack.py')
+t = p.read_text()
+old_bad = '''if os.environ.get("TVM_FFI_DISABLE_TORCH_C_DLPACK", "0") == "0":
+    try:
+    _LIB = load_torch_c_dlpack_extension()'''
+new_good = '''if os.environ.get("TVM_FFI_DISABLE_TORCH_C_DLPACK", "0") == "0":
+    try:
+        _LIB = load_torch_c_dlpack_extension()'''
+if old_bad in t:
+    t = t.replace(old_bad, new_good)
+    p.write_text(t)
+    print('Fixed tvm_ffi indentation')
+PYEOF
+
+# Patch 7: vllm platform ROCm detection fallback via PyTorch HIP (when amdsmi pip not installed)
+python3 << 'PYEOF'
+import pathlib
+p = pathlib.Path('/opt/vllm-venv/lib/python3.12/site-packages/vllm/platforms/__init__.py')
+t = p.read_text()
+old = """    except Exception as e:
+        logger.debug("ROCm platform is not available because: %s", str(e))
+
+    if not is_rocm and in_wsl():"""
+new = """    except Exception as e:
+        logger.debug("ROCm platform is not available because: %s", str(e))
+
+    # Fallback: check PyTorch HIP directly (covers native ROCm without amdsmi pip)
+    if not is_rocm:
+        try:
+            import torch
+            if getattr(torch.version, "hip", None) and torch.cuda.is_available():
+                is_rocm = True
+                logger.debug("Confirmed ROCm platform is available via PyTorch HIP fallback.")
+        except Exception as e2:
+            logger.debug("ROCm HIP fallback detection failed because: %s", str(e2))
+
+    if not is_rocm and in_wsl():"""
+if old in t and "PyTorch HIP fallback" not in t:
+    t = t.replace(old, new)
+    p.write_text(t)
+    print('Patched vllm/platforms/__init__.py for ROCm HIP fallback')
+else:
+    print('platform __init__.py already patched or pattern not found')
+PYEOF
+
 # --- 4. MODEL DIR ---
 echo "[4/8] Checking model directory ${MODEL_DIR}..."
 mkdir -p "${MODEL_DIR}"
