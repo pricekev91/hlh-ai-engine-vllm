@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # configure-ai-engine-inside-lxc.sh (vLLM native variant)
-# Version: 0.3.0
+# Version: 0.3.1
 # Description: Bootstrap native vLLM (no docker) on Ubuntu 24.04 LXC
 #              with ROCm userspace installed in-container (gfx1150).
 # Target GPU: AMD Radeon 890M (gfx1150/Strix Halo) on Proxmox 9.x privileged LXC
 # Requirements: Run as root inside privileged LXC with GPU passthrough
 #               (/dev/dri/card0, renderD128, /dev/kfd) and /srv/ai/models bind mount
 # Changelog:
+#   0.3.1 - FIX: VLLM_USE_V2_MODEL_RUNNER=0 (checkpoint.md proven: CUDA-wheel has no UVA
+#           op get_cuda_view_from_cpu_tensor, V2 crashes; V1 runner works). Fix ROCm
+#           paths (/opt/rocm vs /opt/rocm/core-10.0), pin triton to 3.4.0 to match
+#           pytorch-triton-rocm, pip amdsmi for clean platform detection.
 #   0.3.0 - PHASE 2 refactor: REMOVED DOCKER. vLLM now runs natively in LXC.
 #           Installs ROCm userspace in-container (matching host ROCM_VERSION),
 #           Python venv, vLLM via pip with ROCm support. Runtime config in /etc/vllm.env,
@@ -118,8 +122,15 @@ apt-get install -y --no-install-recommends \
   rocm-smi \
   amdrocm-amdsmi 2>&1 || true
 
-# Add ld.so.conf for ROCm libs
-echo "/opt/rocm-${ROCM_MM}/lib" > /etc/ld.so.conf.d/rocm.conf 2>/dev/null || echo "/opt/rocm/lib" > /etc/ld.so.conf.d/rocm.conf
+# Add ld.so.conf for ROCm libs (use /opt/rocm symlink which points to actual versioned dir)
+echo "/opt/rocm/lib" > /etc/ld.so.conf.d/rocm.conf
+# Also add versioned path if it exists (covers /opt/rocm/core-10.0 case)
+if [[ -d "/opt/rocm-${ROCM_MM}" ]]; then
+  echo "/opt/rocm-${ROCM_MM}/lib" >> /etc/ld.so.conf.d/rocm.conf
+fi
+if [[ -d "/opt/rocm/core-${ROCM_MM}" ]]; then
+  echo "/opt/rocm/core-${ROCM_MM}/lib" >> /etc/ld.so.conf.d/rocm.conf
+fi
 ldconfig
 
 # Verify ROCm in LXC
@@ -158,6 +169,14 @@ if [[ "${ROCM_MAJOR}" -ge 10 ]] 2>/dev/null; then
     --index-url https://download.pytorch.org/whl/rocm6.4 \
     torch==2.8.0+rocm6.4 torchvision==0.23.0+rocm6.4 torchaudio==2.8.0+rocm6.4 2>&1 | tail -10
 fi
+
+# Pin triton to match pytorch-triton-rocm (3.7.1 breaks vllm's constexpr_function import)
+echo "[3/8] Pinning triton to 3.4.0 to match pytorch-triton-rocm..."
+"${VENV_DIR}/bin/pip" install --no-cache-dir --force-reinstall triton==3.4.0 2>&1 | tail -10 || true
+
+# Install amdsmi pip for clean vllm platform detection (fallback patch remains)
+echo "[3/8] Installing amdsmi pip package..."
+"${VENV_DIR}/bin/pip" install --no-cache-dir amdsmi 2>&1 | tail -10 || echo "WARNING: amdsmi pip install failed, HIP fallback patch will cover it"
 
 # Apply ROCm compatibility patches (same as checkpoint.md proven fixes)
 echo "[3/8] Applying ROCm compatibility patches..."
@@ -457,6 +476,9 @@ VLLM_GPU_MEM_UTIL=${GPU_MEM_UTIL}
 VLLM_MAX_MODEL_LEN=${MAX_MODEL_LEN}
 HSA_OVERRIDE_GFX_VERSION=${GFX_VERSION}
 VLLM_LOG_LEVEL=INFO
+# VLLM_USE_V2_MODEL_RUNNER=0 is mandatory on ROCm with CUDA-wheel (no UVA op
+# get_cuda_view_from_cpu_tensor) — see checkpoint.md §5.4. Do not set to 1.
+VLLM_USE_V2_MODEL_RUNNER=0
 # Extra vllm serve args (space-separated, no quoting). Examples:
 #   VLLM_EXTRA_ARGS=--max-num-seqs 8 --skip-mm-profiling
 VLLM_EXTRA_ARGS=
@@ -471,15 +493,16 @@ cat > "${RUNNER}" << 'RUNNER'
 set -euo pipefail
 set -a; . /etc/vllm.env; set +a
 
-# Environment for ROCm - use direct paths to avoid alternatives/mount namespace issues
+# Environment for ROCm - use /opt/rocm symlink (resolves to actual versioned dir)
 export HSA_OVERRIDE_GFX_VERSION="${HSA_OVERRIDE_GFX_VERSION}"
+export VLLM_USE_V2_MODEL_RUNNER="${VLLM_USE_V2_MODEL_RUNNER:-0}"
 export VLLM_LOGGING_LEVEL="${VLLM_LOG_LEVEL}"
 export HF_HUB_CACHE="/srv/ai/models/.hf-cache"
 export PYTHONPATH="/opt/vllm-venv/lib/python3.12/site-packages:${PYTHONPATH:-}"
-export PATH="/opt/vllm-venv/bin:/opt/rocm/core-10.0/bin:${PATH}"
-export LD_LIBRARY_PATH="/opt/rocm/core-10.0/lib:/opt/rocm/core-10.0/lib64:${LD_LIBRARY_PATH:-}"
-export ROCM_PATH="/opt/rocm/core-10.0"
-export HIP_PATH="/opt/rocm/core-10.0"
+export PATH="/opt/vllm-venv/bin:/opt/rocm/bin:${PATH}"
+export LD_LIBRARY_PATH="/opt/rocm/lib:/opt/rocm/lib64:${LD_LIBRARY_PATH:-}"
+export ROCM_PATH="/opt/rocm"
+export HIP_PATH="/opt/rocm"
 
 # vLLM serve arguments
 ARGS=(
@@ -514,6 +537,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=-/etc/vllm.env
+Environment=VLLM_USE_V2_MODEL_RUNNER=0
 ExecStart=${RUNNER}
 Restart=on-failure
 RestartSec=10

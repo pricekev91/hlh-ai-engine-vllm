@@ -5,6 +5,20 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-09-18
+
+### Fixed
+
+- **CRITICAL: vLLM V2 runner UVA crash** — `AttributeError: torch.ops._C.get_cuda_view_from_cpu_tensor` at `vllm/utils/torch_utils.py:916` → `vllm/v1/worker/gpu/buffer_utils.py:50` (GPUModelRunnerV2). PyPI `vllm 0.29.0` CUDA wheel has no ROCm UVA op on `torch 2.8.0+rocm6.4`. Fix: set `VLLM_USE_V2_MODEL_RUNNER=0` in `/etc/vllm.env`, `vllm-run.sh`, and `vllm.service` (`Environment=VLLM_USE_V2_MODEL_RUNNER=0`) — proven `checkpoint.md:4-5`.
+- **ROCm paths** — runner hardcoded `/opt/rocm/core-10.0` but live LXC uses `/opt/rocm` symlink (`/etc/alternatives/core`). Now uses `/opt/rocm/lib` + `PATH=/opt/rocm/bin`; `ld.so.conf` covers both.
+- **Triton pin** — `pytorch-triton-rocm 3.4.0` vs `triton 3.7.1` mismatch → `cannot import constexpr_function`. Now force `triton==3.4.0` after venv.
+- **amdsmi pip** — add `pip install amdsmi` for clean `vllm/platforms/rocm.py` detection (fallback shim retained).
+- **Deploy UX** — `deploy-hlh-ai-engine-vllm.sh` now offers `y` (destroy/recreate) / `u` (update in-place, fast ~2-5 min) / `n` (abort) when LXC exists; flags `--update` / `--destroy` for non-interactive.
+
+### Changed
+
+- `VLLM_MAX_MODEL_LEN` reverted to `4096` (was 131072 in 0.3.0; 131k fails validation for Qwen3.5-9B, derived max ~40960; 4096 matches `checkpoint.md` proven safe and commit `c5f4a39`).
+
 ## [0.3.0] - 2026-09-18
 
 ### Changed
@@ -14,7 +28,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Runtime config `/etc/vllm.env` simplified (removed `VLLM_IMAGE`, `VLLM_SHM_SIZE`, docker-specific vars); added native ROCm env vars.
 - Default model confirmed as **`/srv/ai/models/Qwen3.5-9B`** (18 GB bf16 safetensors, `qwen3_5` VLM, served as `qwen3.5-9b`).
 - `HSA_OVERRIDE_GFX_VERSION=11.0.0` remains mandatory (proven override for gfx1150).
-- `VLLM_MAX_MODEL_LEN` increased to `131072` (was 4096) to support longer contexts.
 
 ### Removed
 

@@ -49,12 +49,19 @@ This repository deploys and configures the **engine-vllm** LXC on the HLH Proxmo
 
 ## Quick Start
 
-Full (re)deploy from the Proxmox host (destroys/recreates LXC `113` from scratch; models persist via the ZFS bind):
+Full (re)deploy from the Proxmox host. If LXC `113` exists you get a prompt:
 
 ```bash
 ./deploy-hlh-ai-engine-vllm.sh
+#   y = destroy & recreate from scratch (full rebuild, ~10-20 min, models persist on ZFS)
+#   u = update in-place: patch existing LXC (fast, ~2-5 min — use for iter on bootstrap)
+#   n = abort
+
+# Non-interactive:
+./deploy-hlh-ai-engine-vllm.sh --update   # fast patch path (same as answering 'u')
+./deploy-hlh-ai-engine-vllm.sh --destroy  # full rebuild (same as answering 'y')
 # Overrides:
-ROCM_VERSION=10.0.0 ./deploy-hlh-ai-engine-vllm.sh
+ROCM_VERSION=10.0.0 ./deploy-hlh-ai-engine-vllm.sh --update
 ```
 
 Reconfigure an existing LXC via Ansible (no recreate — this is the phase-2 path for the live box):
@@ -167,8 +174,11 @@ docker-image approach (`vllm/vllm-openai-rocm`) and the venv-era debugging (see 
   **mandatory** for the vLLM/torch combo validated on this box. `11.5.0` → `HIP error:
   invalid device function` at first kernel launch. If a future vLLM ships native gfx1150
   kernels, verify and drop the override.
+- `VLLM_USE_V2_MODEL_RUNNER=0` is mandatory on ROCm with the PyPI CUDA wheel (no UVA op
+  `get_cuda_view_from_cpu_tensor`); V2 runner crashes at `vllm/utils/torch_utils.py:916` → `vllm/v1/worker/gpu/buffer_utils.py:50`
+  (see `checkpoint.md` §5.4). Set in `/etc/vllm.env`, `vllm-run.sh`, and `vllm.service`.
 - `--enforce-eager` is on by default (APU lacks some flash-attention / graph-capture paths).
-- ROCm compatibility patches applied at bootstrap (torch.accelerator shim, SiluAndMul fallback, vllm_c gating).
+- ROCm compatibility patches applied at bootstrap (torch.accelerator shim, SiluAndMul fallback, vllm_c gating, triton 3.4.0 pin, amdsmi pip).
 - Service runs as root with GPU devices passed through from host (cgroup2/mount in LXC config).
 
 ## vLLM Tuning Reference
@@ -183,8 +193,9 @@ Runtime config lives in **`/etc/vllm.env`** (edit → `systemctl restart vllm`, 
 | `VLLM_MODEL_PATH` | `/srv/ai/models/Qwen3.5-9B` | Local dir or HF id |
 | `VLLM_SERVED_NAME` | `qwen3.5-9b` | Name exposed in `/v1/models` |
 | `VLLM_GPU_MEM_UTIL` | `0.40` | Fraction of the ~68.7 GB GTT pool (weights + KV). Lower to `0.30` if co-tenant 112 needs more |
-| `VLLM_MAX_MODEL_LEN` | `131072` | Context window (262k max of the model won't fit in KV) |
+| `VLLM_MAX_MODEL_LEN` | `4096` | Context window (derived max for Qwen3.5-9B ~40960; 131072 fails validation, see `checkpoint.md`) |
 | `HSA_OVERRIDE_GFX_VERSION` | `11.0.0` | gfx1150 kernel target override (see notes) |
+| `VLLM_USE_V2_MODEL_RUNNER` | `0` | Disable V2 runner on ROCm CUDA-wheel (mandatory, §notes) |
 | `VLLM_LOG_LEVEL` | `INFO` | vLLM logging level |
 | `VLLM_EXTRA_ARGS` | *(empty)* | Extra `vllm serve` args, e.g. `--max-num-seqs 8 --skip-mm-profiling` |
 
@@ -212,12 +223,15 @@ takes several minutes).
 ## Gotchas
 
 - **`HSA_OVERRIDE_GFX_VERSION=11.0.0`** is mandatory with the validated vLLM/torch combo (§notes).
+- **`VLLM_USE_V2_MODEL_RUNNER=0`** is mandatory on ROCm with the PyPI CUDA wheel (§notes; V2 needs `torch.ops._C.get_cuda_view_from_cpu_tensor` which is CUDA-only).
+- **`VLLM_MAX_MODEL_LEN=4096`** — 131072 fails validation for Qwen3.5-9B (derived max ~40960); 4096 matches `checkpoint.md` proven safe for co-tenancy.
 - **Memory**: vLLM claims `VLLM_GPU_MEM_UTIL` × ~68.7 GB GTT at startup (weights + KV pre-alloc).
   `0.40` ≈ 27 GB. Sibling `112` (llama.cpp) shares the same physical RAM — keep an eye on
-  `free -g` / host `rocm-smi`.
+  `free -g` / host `rocm-smi`. Lower to `0.30` for patch-test cycles.
 - **Co-tenancy**: `112` and `113` share `c9:00.0`. This repo never stops `112`.
 - **K80s** on this host are not recognized by the driver and are out of scope (see `hlh-ai-engine-k80` / future V100/MI50 shopping).
 - Engine restart cycle ≈ 2–5 min (18 GB weights off ZFS + Python import + model load).
+- **Deploy prompt:** existing LXC `113` now offers `y` (destroy/recreate) vs `u` (update in-place fast patch) vs `n` (abort). Use `u`/`--update` for quick iter on bootstrap; `y`/`--destroy` only when you need a clean slate.
 - ROCm version in LXC must match host major version (handled by deploy script).
 
 ## Governance

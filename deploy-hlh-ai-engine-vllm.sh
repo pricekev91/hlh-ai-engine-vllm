@@ -7,14 +7,28 @@ BOOTSTRAP_SCRIPT="${SCRIPT_DIR}/ansible/files/configure-ai-engine-inside-lxc.sh"
 usage() {
 	cat <<'EOF'
 Usage:
-	./deploy-hlh-ai-engine-vllm.sh
+	./deploy-hlh-ai-engine-vllm.sh [--update] [--destroy]
 
 This is the direct Proxmox bootstrap path (no OpenTofu):
 	1) Create privileged LXC 113 (hlh-ai-engine-vllm)
-    2) Configure GPU passthrough (890M gfx1150 only)
-    3) Start container
-    4) Push/run in-container bootstrap script (native vLLM install + vllm.service running
-       vLLM serving /srv/ai/models/Qwen3.5-9B — phase 1)
+     2) Configure GPU passthrough (890M gfx1150 only)
+     3) Start container
+     4) Push/run in-container bootstrap script (native vLLM install + vllm.service running
+        vLLM serving /srv/ai/models/Qwen3.5-9B — phase 1)
+
+If LXC 113 already exists, interactive prompt offers:
+  y = destroy & recreate from scratch (full rebuild, ~10-20 min)
+  n = abort
+  u = update in-place: push/run bootstrap inside existing LXC (fast patch, ~2-5 min)
+
+Flags:
+  --update    Non-interactive: update in-place if LXC exists (same as answering 'u')
+  --destroy   Non-interactive: destroy & recreate if LXC exists (same as answering 'y')
+
+Examples:
+  ./deploy-hlh-ai-engine-vllm.sh              # interactive Y/N/U if 113 exists
+  ./deploy-hlh-ai-engine-vllm.sh --update     # fast patch path
+  ./deploy-hlh-ai-engine-vllm.sh --destroy    # full rebuild
 EOF
 }
 
@@ -38,11 +52,18 @@ VLLM_MODEL_DIR="/srv/ai/models"
 VLLM_DEFAULT_MODEL="Qwen3.5-9B"
 VLLM_BACKEND="vLLM ROCm native serving ${VLLM_MODEL_DIR}/${VLLM_DEFAULT_MODEL}"
 
+NONINTERACTIVE_MODE=""
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 		-h|--help)
 			usage
 			exit 0
+			;;
+		--update)
+			NONINTERACTIVE_MODE="update"
+			;;
+		--destroy)
+			NONINTERACTIVE_MODE="destroy"
 			;;
 		*)
 			echo "ERROR: Unknown option: $1" >&2
@@ -224,13 +245,27 @@ fi
 confirm_existing_lxc_delete() {
 	local answer
 
+	if [[ "${NONINTERACTIVE_MODE}" == "destroy" ]]; then
+		echo "Non-interactive --destroy: will destroy & recreate LXC ${LXC_ID}"
+		return 0
+	elif [[ "${NONINTERACTIVE_MODE}" == "update" ]]; then
+		echo "Non-interactive --update: will update in-place (no destroy)"
+		return 2
+	fi
+
 	printf '%s\n' 'Are you sure?  hlh-ai-engine-vllm is already running and deployed!'
-	printf '%s' 'Delete it and redeploy? [y/N] '
+	printf '%s\n' '  y = destroy & recreate from scratch (full rebuild, ~10-20 min)'
+	printf '%s\n' '  u = update in-place: push/run bootstrap inside existing LXC (fast patch, ~2-5 min)'
+	printf '%s\n' '  n = abort'
+	printf '%s' 'Choose [y/N/u]: '
 	read -r answer
 
 	case "$answer" in
-		y|Y|yes|YES)
+		y|Y|yes|YES|destroy|DESTROY)
 			return 0
+			;;
+		u|U|update|UPDATE)
+			return 2
 			;;
 		*)
 			echo "Aborted." >&2
@@ -245,11 +280,49 @@ mkdir -p "${MODEL_HOST_DIR}"
 chown 0:0 "${MODEL_HOST_DIR}"
 chmod 775 "${MODEL_HOST_DIR}"
 
+LXC_EXISTS=false
+UPDATE_IN_PLACE=false
 if pct status "${LXC_ID}" >/dev/null 2>&1; then
+	LXC_EXISTS=true
+	# capture return code: 0=destroy, 2=update
+	set +e
 	confirm_existing_lxc_delete
-	echo "[1/6] Deleting existing LXC ${LXC_ID} so it can be redeployed..."
-	pct stop "${LXC_ID}" >/dev/null 2>&1 || true
-	pct destroy "${LXC_ID}" >/dev/null 2>&1 || pct delete "${LXC_ID}"
+	_confirm_rc=$?
+	set -e
+	if [[ ${_confirm_rc} -eq 2 ]]; then
+		UPDATE_IN_PLACE=true
+		echo "[1/6] Update in-place requested — will NOT destroy LXC ${LXC_ID}, will patch inside existing container."
+	elif [[ ${_confirm_rc} -eq 0 ]]; then
+		echo "[1/6] Deleting existing LXC ${LXC_ID} so it can be redeployed..."
+		pct stop "${LXC_ID}" >/dev/null 2>&1 || true
+		pct destroy "${LXC_ID}" >/dev/null 2>&1 || pct delete "${LXC_ID}"
+		LXC_EXISTS=false
+	fi
+fi
+
+if [[ "${UPDATE_IN_PLACE}" == "true" ]]; then
+	echo "[2/6] Skipping LXC creation (update mode) — container ${LXC_ID} already exists, preserving GPU passthrough."
+	echo "[3/6] Skipping GPU passthrough wiring (already configured in /etc/pve/lxc/${LXC_ID}.conf)."
+	echo "[4/6] Ensuring LXC ${LXC_ID} is running..."
+	pct status "${LXC_ID}" 2>&1 | head -5 || true
+	if ! pct status "${LXC_ID}" 2>&1 | grep -q "running"; then
+		echo "  LXC not running — starting..."
+		pct start "${LXC_ID}"
+		sleep 5
+	fi
+	echo "[5/6] Running in-container bootstrap (update mode — patch vLLM in place)..."
+	pct exec "${LXC_ID}" -- mkdir -p /root/ai-engine-bootstrap
+	pct push "${LXC_ID}" "$BOOTSTRAP_SCRIPT" /root/ai-engine-bootstrap/configure-ai-engine-inside-lxc.sh --perms 0755
+	pct exec "${LXC_ID}" -- env ROCM_VERSION="${ROCM_VERSION}" VLLM_DEFAULT_MODEL="${VLLM_DEFAULT_MODEL}" bash /root/ai-engine-bootstrap/configure-ai-engine-inside-lxc.sh
+	echo "[6/6] Update complete. LXC ${LXC_ID} (${LXC_NAME}) patched in place (no recreate)."
+	echo "Model storage: ${MODEL_HOST_DIR} (host) <-> ${MODEL_LXC_DIR} (container) on ${POOL}"
+	echo "Backend      : ${VLLM_BACKEND} (gfx1150, ROCm HIP native in-container)"
+	echo "vLLM API (OpenAI-compatible) : http://192.168.1.13:8000 ( /health /v1/models /v1/chat/completions )"
+	echo "Open WebUI                   : NOT configured (phase 10)"
+	echo "Runtime config inside LXC    : /etc/vllm.env"
+	echo "Health: curl -s http://192.168.1.13:8000/health && curl -s http://192.168.1.13:8000/v1/models | head -100"
+	echo "Logs:   ssh root@192.168.1.13 'journalctl -u vllm -f'"
+	exit 0
 fi
 
 echo "[2/6] Creating privileged Ubuntu LXC (${LXC_ID}, ${LXC_NAME}) on ${POOL} — ROCm ${ROCM_VERSION}, ${VLLM_BACKEND}..."
