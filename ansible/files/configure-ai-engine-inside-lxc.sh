@@ -31,7 +31,7 @@ DEFAULT_MODEL_PATH="${DEFAULT_MODEL_PATH:-${MODEL_DIR}/Qwen3.5-9B}"
 DEFAULT_MODEL_NAME="${DEFAULT_MODEL_NAME:-qwen3.5-9b}"
 GFX_VERSION="${HSA_OVERRIDE_GFX_VERSION:-11.0.0}"
 GPU_MEM_UTIL="${VLLM_GPU_MEM_UTIL:-0.40}"
-MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-131072}"
+MAX_MODEL_LEN="${VLLM_MAX_MODEL_LEN:-4096}"
 VLLM_SERVICE="/etc/systemd/system/vllm.service"
 RUNNER="/usr/local/bin/vllm-run.sh"
 VLLM_ENV="/etc/vllm.env"
@@ -166,7 +166,6 @@ SP="${VENV_DIR}/lib/python3.12/site-packages/vllm"
 # Patch 1: torch.accelerator shim for ROCm
 python3 << 'PYEOF'
 shim_content = '''# vllm_rocm_accel_shim.py - backfill torch.accelerator on ROCm builds
-# vLLM 0.29+ calls torch.accelerator.* which are CUDA-only in torch 2.8+rocm
 import torch
 if not hasattr(torch, 'accelerator'):
     class _AcceleratorShim:
@@ -207,6 +206,24 @@ if not hasattr(torch, 'accelerator'):
         def empty_host_cache():
             pass
     torch.accelerator = _AcceleratorShim()
+else:
+    _acc = torch.accelerator
+    if not hasattr(_acc, 'empty_cache'):
+        _acc.empty_cache = lambda: torch.cuda.empty_cache() if hasattr(torch.cuda, 'empty_cache') else None
+    if not hasattr(_acc, 'memory_stats'):
+        _acc.memory_stats = lambda device=None: torch.cuda.memory_stats(device) if hasattr(torch.cuda, 'memory_stats') else {}
+    if not hasattr(_acc, 'memory_allocated'):
+        _acc.memory_allocated = lambda device=None: torch.cuda.memory_allocated(device) if hasattr(torch.cuda, 'memory_allocated') else 0
+    if not hasattr(_acc, 'max_memory_allocated'):
+        _acc.max_memory_allocated = lambda device=None: torch.cuda.max_memory_allocated(device) if hasattr(torch.cuda, 'max_memory_allocated') else 0
+    if not hasattr(_acc, 'memory_reserved'):
+        _acc.memory_reserved = lambda device=None: torch.cuda.memory_reserved(device) if hasattr(torch.cuda, 'memory_reserved') else 0
+    if not hasattr(_acc, 'reset_peak_memory_stats'):
+        _acc.reset_peak_memory_stats = lambda device=None: torch.cuda.reset_peak_memory_stats(device) if hasattr(torch.cuda, 'reset_peak_memory_stats') else None
+    if not hasattr(_acc, 'get_memory_info'):
+        _acc.get_memory_info = lambda device=None: torch.cuda.mem_get_info(device) if hasattr(torch.cuda, 'mem_get_info') else (0, 0)
+    if not hasattr(_acc, 'empty_host_cache'):
+        _acc.empty_host_cache = lambda: None
 '''
 with open("/opt/vllm-venv/lib/python3.12/site-packages/vllm_rocm_accel_shim.py", "w") as f:
     f.write(shim_content)
@@ -216,31 +233,50 @@ PYEOF
 # Create .pth to auto-load shim
 echo "import vllm_rocm_accel_shim" > "${VENV_DIR}/lib/python3.12/site-packages/vllm_rocm_accel_shim.pth"
 
-# Patch 2: SiluAndMul native fallback
+# Patch 2: SiluAndMul native fallback (two locations)
 ACTIVATION_PY="${SP}/model_executor/layers/activation.py"
 if [[ -f "${ACTIVATION_PY}" ]]; then
-  sed -i '/self.op = torch.ops._C.silu_and_mul/a\
-        except (AttributeError, RuntimeError):\
-            self._forward_method = self.forward_native' "${ACTIVATION_PY}" 2>/dev/null || true
-  # More robust patch - wrap the whole assignment
   python3 << 'PYEOF'
-import re
-path = "/opt/vllm-venv/lib/python3.12/site-packages/vllm/model_executor/layers/activation.py"
-with open(path) as f:
-    content = f.read()
-# Find SiluAndMul.__init__ and wrap the _C.silu_and_mul assignment
-old = "self.op = torch.ops._C.silu_and_mul"
-new = """try:
-            self.op = torch.ops._C.silu_and_mul
-        except (AttributeError, RuntimeError):
-            self._forward_method = self.forward_native"""
-if old in content and new not in content:
-    content = content.replace(old, new)
-    with open(path, 'w') as f:
-        f.write(content)
-    print("Patched activation.py")
-else:
-    print("activation.py already patched or pattern not found")
+import re, pathlib
+path = pathlib.Path("/opt/vllm-venv/lib/python3.12/site-packages/vllm/model_executor/layers/activation.py")
+t = path.read_text()
+# Patch 1: SiluAndMul (forward_native)
+old1 = """        if (
+            current_platform.is_cuda_alike()
+            or current_platform.is_cpu()
+            or current_platform.is_xpu()
+        ):
+            self.op = torch.ops._C.silu_and_mul"""
+new1 = """        if (
+            current_platform.is_cuda_alike()
+            or current_platform.is_cpu()
+            or current_platform.is_xpu()
+        ):
+            try:
+                self.op = torch.ops._C.silu_and_mul
+            except (AttributeError, RuntimeError):
+                self._forward_method = self.forward_native"""
+if old1 in t:
+    t = t.replace(old1, new1)
+    print("Patched SiluAndMul")
+# Patch 2: SiluAndMulWithClamp / second occurrence (forward_native_with_clamp)
+old2 = """        elif current_platform.is_cuda_alike():
+            self.op = torch.ops._C.silu_and_mul"""
+new2 = """        elif current_platform.is_cuda_alike():
+            try:
+                self.op = torch.ops._C.silu_and_mul
+            except (AttributeError, RuntimeError):
+                self._forward_method = self.forward_native_with_clamp"""
+if old2 in t and "forward_native_with_clamp" not in t.split(old2)[0][-200:]:
+    # only if not yet patched with correct fallback
+    if old2 in t:
+        t = t.replace(old2, new2)
+        print("Patched second silu")
+# fallback generic if patterns not matched but still bare assignment remains
+if "self.op = torch.ops._C.silu_and_mul" in t and "try:" not in t[t.find("self.op = torch.ops._C.silu_and_mul")-100:t.find("self.op = torch.ops._C.silu_and_mul")+100]:
+    print("Warning: unpatched silu_and_mul remains")
+path.write_text(t)
+print("activation.py patches done")
 PYEOF
 fi
 
