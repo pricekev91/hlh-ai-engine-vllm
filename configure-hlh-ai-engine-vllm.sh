@@ -59,7 +59,8 @@ systemctl disable vllm 2>/dev/null || true
 echo "[1/7] Installing base packages..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y --no-install-recommends curl ca-certificates git openssh-server
+apt-get install -y --no-install-recommends curl ca-certificates git openssh-server \
+  libgomp1 libnuma1 libatomic1 libdrm2
 
 if [[ "${ENABLE_ROOT_PASSWORD_SSH}" == "1" ]]; then
   mkdir -p /etc/ssh/sshd_config.d
@@ -112,6 +113,13 @@ if grep -qiE '^(nvidia-|cuda-)' <<<"${PKGS}"; then
   echo "FATAL: CUDA packages found in the venv. Something pulled the CUDA build of vLLM/torch." >&2
   grep -iE '^(nvidia-|cuda-)' <<<"${PKGS}" >&2 || true
   exit 1
+fi
+
+# List ALL missing shared libs up front (warning only; the python check below is the real gate)
+MISSING="$(ldd "${VENV_DIR}"/lib/python${PYTHON_VERSION}/site-packages/torch/lib/*.so 2>/dev/null | grep 'not found' | sort -u || true)"
+if [[ -n "${MISSING}" ]]; then
+  echo "WARNING: missing shared libraries (install matching apt packages):"
+  echo "${MISSING}"
 fi
 
 "${PY}" - <<'EOF'
