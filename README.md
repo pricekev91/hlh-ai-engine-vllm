@@ -64,18 +64,19 @@ Full (re)deploy from the Proxmox host. If LXC `113` exists you get a prompt:
 ROCM_VERSION=10.0.0 ./deploy-hlh-ai-engine-vllm.sh --update
 ```
 
-Reconfigure an existing LXC via Ansible (no recreate — this is the phase-2 path for the live box):
+Reconfigure an existing LXC via pure bash (no recreate — fast patch path):
 
 ```bash
 ./configure-hlh-ai-engine-vllm.sh
 ./configure-hlh-ai-engine-vllm.sh --host 192.168.1.13
+./configure-hlh-ai-engine-vllm.sh --lxc 113
 ```
 
 Or manually on the LXC:
 
 ```bash
 # from repo root, on the Proxmox host:
-pct push 113 ansible/files/configure-ai-engine-inside-lxc.sh /root/ai-engine-bootstrap/configure-ai-engine-inside-lxc.sh --perms 0755
+pct push 113 configure-ai-engine-inside-lxc.sh /root/ai-engine-bootstrap/configure-ai-engine-inside-lxc.sh --perms 0755
 pct exec 113 -- env ROCM_VERSION=10.0.0 bash /root/ai-engine-bootstrap/configure-ai-engine-inside-lxc.sh
 ```
 
@@ -96,36 +97,17 @@ curl -s http://192.168.1.13:8000/v1/chat/completions -H 'Content-Type: applicati
 
 ## Deployment Model
 
-Deployment and configuration are separate phases:
+Deployment and configuration are separate phases (pure bash):
 
 1. **Provisioning**: `deploy-hlh-ai-engine-vllm.sh` creates privileged LXC `113`, wires GPU
    passthrough (`card0` + `renderD128` + `kfd` only — K80 nodes excluded so ROCm never enumerates
    an unsupported device), checks/upgrades the **host** ROCm if the major mismatches
    (`stable.repo.amd.com` for 10.x, `packages-multi-arch` for 7.x), and pushes
-   `ansible/files/configure-ai-engine-inside-lxc.sh` via `pct push` (`ROCM_VERSION` forwarded).
-2. **Configuration**: `ansible/playbooks/hlh-ai-engine-vllm.yml` runs
-   `ansible/files/configure-ai-engine-inside-lxc.sh` inside the container:
+   `configure-ai-engine-inside-lxc.sh` via `pct push` (`ROCM_VERSION` forwarded).
+2. **Configuration**: `configure-hlh-ai-engine-vllm.sh` (or `deploy --update`) runs
+   `configure-ai-engine-inside-lxc.sh` inside the container via `pct push`+`pct exec` (or `scp`+`ssh` fallback):
    installs ROCm userspace, Python venv, vLLM via pip, writes `/etc/vllm.env` + `/usr/local/bin/vllm-run.sh` + `vllm.service`,
    starts vLLM, health-probes.
-
-## OpenTofu Module
-
-For programmatic LXC creation via OpenTofu (bind mount, not storage volume):
-
-```hcl
-module "hlh_ai_engine_vllm" {
-  source = "./opentofu"
-  pm_api_url          = var.pm_api_url
-  pm_api_token_id     = var.pm_api_token_id
-  pm_api_token_secret = var.pm_api_token_secret
-  target_node         = "prox01"
-  hostname            = "hlh-ai-engine-vllm"
-  vmid                = 113  # .13 parity with 192.168.1.13
-  ip_cidr             = "192.168.1.13/24"
-  # ... other variables (see opentofu/variables.tf)
-}
-# GPU cgroup/mount for /dev/dri + /dev/kfd appended by deploy-hlh-ai-engine-vllm.sh post-create
-```
 
 ## Runtime Contract
 
@@ -146,14 +128,8 @@ module "hlh_ai_engine_vllm" {
 ```
 hlh-ai-engine-vllm/
 ├── deploy-hlh-ai-engine-vllm.sh          # LXC 113 creation + GPU passthrough + host ROCm check + bootstrap push
-├── configure-hlh-ai-engine-vllm.sh       # Ansible-based reconfiguration (existing LXC, no recreate)
-├── ansible/
-│   ├── inventories/hlh-ai-engine-vllm.yml
-│   ├── playbooks/hlh-ai-engine-vllm.yml
-│   └── files/configure-ai-engine-inside-lxc.sh  # ROCm + venv + vLLM + /etc/vllm.env + vllm-run.sh + vllm.service :8000
-├── opentofu/
-│   ├── main.tf
-│   └── variables.tf
+├── configure-hlh-ai-engine-vllm.sh       # pure bash reconfiguration (pct push/exec)
+├── configure-ai-engine-inside-lxc.sh     # in-LXC bootstrap: ROCm + venv + vLLM + /etc/vllm.env + vllm-run.sh + vllm.service :8000
 ├── 00_BACKLOG.md
 ├── 10_ACTIVE.md
 ├── 90_DONE.md

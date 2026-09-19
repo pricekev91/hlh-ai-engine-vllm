@@ -35,14 +35,10 @@ Items for future implementation. These are human-entered ideas not yet reflected
 
 - Give LXC 113 a dedicated docker data-root subvolume (like the `hlh-docker` pattern on the host) — the rocm image is large and the 64G rootfs is shared with the OS
 
-## Ansible
+## Shell / CI
 
-- Add ansible-lint to CI
-- Split bootstrap into roles (docker, vllm.env, vllm.service, open-webui)
-
-## OpenTofu
-
-- Migrate telmate/proxmox -> bpg/proxmox (align with hlh-docker)
+- Add shellcheck to CI for deploy/configure scripts
+- Split bootstrap into pure bash functions (rocm, venv, vllm.env, vllm.service, open-webui)
 
 ## Observability
 

@@ -37,14 +37,10 @@ This is what is already implemented and verified in this repository.
 - vLLM API `http://192.168.1.13:8000` (`/health`, `/v1/models`, `/v1/chat/completions`) — OpenAI-compatible
 - Open WebUI — phase 10 (not configured in 0.2.0)
 
-## Ansible
+## Bash IaC
 
-- `ansible/inventories/hlh-ai-engine-vllm.yml` `192.168.1.13` `hlh_ai_engine_vllm` `root`
-- `ansible/playbooks/hlh-ai-engine-vllm.yml` `ansible.builtin.script` → `configure-ai-engine-inside-lxc.sh`
-
-## OpenTofu
-
-- `telmate/proxmox >= 2.7.2` `proxmox_lxc hlh_ai_engine_vllm` `vmid 113` `192.168.1.13/24`
+- Pure bash `deploy-hlh-ai-engine-vllm.sh` + `configure-hlh-ai-engine-vllm.sh` + `configure-ai-engine-inside-lxc.sh` (pct push/exec)
+- LXC `113` `192.168.1.13/24` privileged `nesting,keyctl` `RaidZ1-6TB`
 
 ## Verification
 

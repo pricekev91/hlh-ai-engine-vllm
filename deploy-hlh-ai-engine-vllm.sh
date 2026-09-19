@@ -2,19 +2,19 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BOOTSTRAP_SCRIPT="${SCRIPT_DIR}/ansible/files/configure-ai-engine-inside-lxc.sh"
+BOOTSTRAP_SCRIPT="${SCRIPT_DIR}/configure-ai-engine-inside-lxc.sh"
 
 usage() {
 	cat <<'EOF'
 Usage:
 	./deploy-hlh-ai-engine-vllm.sh [--update] [--destroy]
 
-This is the direct Proxmox bootstrap path (no OpenTofu):
+This is the direct Proxmox bootstrap path (pure bash):
 	1) Create privileged LXC 113 (hlh-ai-engine-vllm)
-     2) Configure GPU passthrough (890M gfx1150 only)
-     3) Start container
-     4) Push/run in-container bootstrap script (native vLLM install + vllm.service running
-        vLLM serving /srv/ai/models/Qwen3.5-9B — phase 1)
+      2) Configure GPU passthrough (890M gfx1150 only)
+      3) Start container
+      4) Push/run in-container bootstrap script (native vLLM install + vllm.service running
+         vLLM serving /srv/ai/models/Qwen3.5-9B — phase 1)
 
 If LXC 113 already exists, interactive prompt offers:
   y = destroy & recreate from scratch (full rebuild, ~10-20 min)
