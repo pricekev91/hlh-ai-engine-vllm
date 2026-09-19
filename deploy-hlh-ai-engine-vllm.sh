@@ -368,6 +368,39 @@ echo "[4/6] Starting LXC ${LXC_ID}..."
 pct start "${LXC_ID}"
 sleep 5
 
+# Prompt to set root password (replaces manual pct enter + passwd)
+# Only on fresh create; skip on --update in-place and non-interactive without --password
+if [[ "${UPDATE_IN_PLACE:-false}" != "true" ]] && [[ -t 0 ]] && [[ -z "${NONINTERACTIVE_MODE:-}" ]]; then
+	echo ""
+	echo "Root password for LXC ${LXC_ID} is not set by pct create."
+	echo "You currently do: pct enter ${LXC_ID} -> passwd"
+	read -rsp "Set root password now? [Y/n] (empty=no, y=set): " _pw_ask; echo
+	case "${_pw_ask}" in
+		""|n|N|no|NO) echo "Skipping password set — you can still run: pct exec ${LXC_ID} -- passwd";;
+		*)
+			read -rsp "New root password for ${LXC_ID}: " _pw; echo
+			if [[ -z "${_pw}" ]]; then echo "Empty password — skipping."; else
+				read -rsp "Confirm root password: " _pw2; echo
+				if [[ "${_pw}" != "${_pw2}" ]]; then
+					echo "Passwords do not match — skipping. Run manually: pct exec ${LXC_ID} -- passwd" >&2
+				else
+					if printf "root:%s\n" "${_pw}" | pct exec "${LXC_ID}" -- chpasswd 2>&1; then
+						echo "Root password set for LXC ${LXC_ID}."
+					else
+						echo "Failed to set password — try manually: pct exec ${LXC_ID} -- passwd" >&2
+					fi
+				fi
+			fi
+			unset _pw _pw2
+			;;
+	esac
+	unset _pw_ask
+elif [[ -n "${LXC_PASSWORD:-}" ]]; then
+	# Non-interactive: allow LXC_PASSWORD env for automation
+	echo "Setting root password via LXC_PASSWORD env..."
+	printf "root:%s\n" "${LXC_PASSWORD}" | pct exec "${LXC_ID}" -- chpasswd && echo "Root password set via env."
+fi
+
 echo "[5/6] Running in-container bootstrap (native vLLM install)..."
 pct exec "${LXC_ID}" -- mkdir -p /root/ai-engine-bootstrap
 pct push "${LXC_ID}" "$BOOTSTRAP_SCRIPT" /root/ai-engine-bootstrap/configure-ai-engine-inside-lxc.sh --perms 0755
