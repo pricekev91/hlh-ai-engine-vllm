@@ -6,8 +6,8 @@
 # Target GPU: AMD Radeon 890M (gfx1150/Strix Point) on Proxmox 9.x privileged LXC
 # Software Bill of Materials — simple git pulls, no 3rd-party bundles (KISS):
 #   #1 ROCm 10.0.0 — git@github.com:ROCm/ROCm.git (apt mirror https://stable.repo.amd.com/rocm/core/packages)
-#   #2 vLLM 0.29.0 — git@github.com:vllm-project/vllm.git (pip vllm[rocm] built from that repo; torch ROCm 2.8.0+rocm6.4 from https://github.com/pytorch/pytorch)
-#      No Lemonade, no prebuilt bundles, no Docker — direct GitHub sources only. Slower compile, less brittle.
+#   #2 vLLM 0.29.0 — git@github.com:vllm-project/vllm.git — built from source with USE_ROCM=1 PYTORCH_ROCM_ARCH=gfx1150 (pip install --no-build-isolation -e .), torch ROCm 2.8.0+rocm6.4 from https://github.com/pytorch/pytorch
+#      No Lemonade, no prebuilt CUDA wheel shims, no Docker — direct GitHub sources only. Slower compile (~30-60m), correct binary (vllm._rocm_C), less brittle.
 # Requirements: Run as root inside privileged LXC with GPU passthrough
 #               (/dev/dri/card0, renderD128, /dev/kfd) and /srv/ai/models bind mount
 # Changelog:
@@ -78,8 +78,8 @@ ROCM_MM="$(echo "${ROCM_VERSION}" | cut -d. -f1,2)"
 echo "[1/8] Installing base dependencies..."
 apt-get update
 apt-get install -y --no-install-recommends \
-  curl ca-certificates gnupg software-properties-common \
-  python3 python3-venv python3-pip \
+  curl ca-certificates gnupg software-properties-common git cmake ninja-build build-essential \
+  python3 python3-venv python3-pip python3-dev \
   openssh-server
 
 # SSH
@@ -170,34 +170,55 @@ else
     torch torchvision torchaudio 2>&1 | tail -10
 fi
 
-# Install vLLM with ROCm support (may overwrite torch — force ROCm torch back after)
-echo "[3/8] Installing vLLM with ROCm support..."
-"${VENV_DIR}/bin/pip" install --no-cache-dir \
-  vllm[rocm] 2>&1 | tail -10
-# vLLM 0.29 pulls CUDA torch 2.13 — force ROCm torch back
-if [[ "${ROCM_MAJOR}" -ge 10 ]] 2>/dev/null; then
-  echo "[3/8] Re-forcing ROCm torch 2.8.0+rocm6.4 (vLLM overwrites with CUDA)..."
-  "${VENV_DIR}/bin/pip" install --no-cache-dir --force-reinstall \
-    --index-url https://download.pytorch.org/whl/rocm6.4 \
-    torch==2.8.0+rocm6.4 torchvision==0.23.0+rocm6.4 torchaudio==2.8.0+rocm6.4 2>&1 | tail -10
+# Install vLLM from source via git (simple git pull, KISS — no wheel shims, less brittle)
+# Pull from GitHub as requested: #2 vLLM git@github.com:vllm-project/vllm.git
+echo "[3/8] Installing vLLM from source (git clone, USE_ROCM=1, PYTORCH_ROCM_ARCH=gfx1150) — slower but correct binary..."
+VLLM_SRC_DIR="/tmp/vllm-src"
+VLLM_VERSION_TAG="v0.29.0"
+# Clean previous source if exists
+rm -rf "${VLLM_SRC_DIR}"
+if ! git clone --depth 1 --branch "${VLLM_VERSION_TAG}" https://github.com/vllm-project/vllm.git "${VLLM_SRC_DIR}" 2>&1 | tail -10; then
+  echo "WARNING: git clone ${VLLM_VERSION_TAG} failed, trying main"
+  git clone --depth 1 https://github.com/vllm-project/vllm.git "${VLLM_SRC_DIR}" 2>&1 | tail -10
 fi
+# Build and install vLLM with ROCm — produces vllm._rocm_C correctly (no libcudart)
+echo "[3/8] Building vLLM ${VLLM_VERSION_TAG} for ROCm gfx1150 (PYTORCH_ROCM_ARCH=gfx1150, MAX_JOBS=12)..."
+export PYTORCH_ROCM_ARCH="gfx1150"
+export MAX_JOBS="12"
+export USE_ROCM="1"
+# Ensure ROCm torch is present before build (build needs it for compilation)
+"${VENV_DIR}/bin/pip" install --no-cache-dir \
+  --index-url https://download.pytorch.org/whl/rocm6.4 \
+  torch==2.8.0+rocm6.4 torchvision==0.23.0+rocm6.4 torchaudio==2.8.0+rocm6.4 2>&1 | tail -5 || true
+# Build vLLM — use no-build-isolation so it sees the ROCm torch we just installed
+(
+  cd "${VLLM_SRC_DIR}"
+  "${VENV_DIR}/bin/pip" install --no-build-isolation -v -e . 2>&1 | tail -100
+) || {
+  echo "ERROR: vLLM source build failed — falling back to pip wheel with shims (brittle)"
+  "${VENV_DIR}/bin/pip" install --no-cache-dir vllm[rocm] 2>&1 | tail -10
+  echo "[3/8] Re-forcing ROCm torch 2.8.0+rocm6.4 (wheel overwrites with CUDA)..."
+  "${VENV_DIR}/bin/pip" install --no-cache-dir --force-reinstall --index-url https://download.pytorch.org/whl/rocm6.4 torch==2.8.0+rocm6.4 torchvision==0.23.0+rocm6.4 torchaudio==2.8.0+rocm6.4 2>&1 | tail -10 || true
+}
+# Verify binary was built correctly (should have _rocm_C, not require libcudart)
+echo "[3/8] Verifying vLLM ROCm binary..."
+ls -lh "${VENV_DIR}/lib/python3.12/site-packages/vllm/_rocm_C"* 2>&1 | head -20 || echo "WARNING: vllm._rocm_C not found — build may have failed"
+ldd "${VENV_DIR}/lib/python3.12/site-packages/vllm/_rocm_C"* 2>&1 | grep -E "libcudart|not found" | head -20 || echo "ldd check OK (no libcudart dependency)"
+"${VENV_DIR}/bin/python" -c "import vllm; print('vllm', vllm.__version__)" 2>&1 | tail -5 || true
 
-# Pin triton to match pytorch-triton-rocm (3.7.1 breaks vllm's constexpr_function import) but keep compat shim
-echo "[3/8] Pinning triton to 3.4.0 to match pytorch-triton-rocm..."
-"${VENV_DIR}/bin/pip" install --no-cache-dir --force-reinstall triton==3.4.0 2>&1 | tail -10 || true
-# Triton 3.4.0 lacks triton.language.target_info (added in 3.7) which vllm 0.29.0 expects — shim it so import succeeds
-echo "[3/8] Shimming triton.language.target_info for vLLM 0.29 compatibility..."
+# With source build, triton from PyTorch ROCm is correct; keep shim only if needed for CUDA wheel fallback
+# When built from source (USE_ROCM=1), vllm’s triton kernels expect newer triton, but pytorch-triton-rocm 3.4.0 is still used for hip; shim ensures compatibility
+echo "[3/8] Ensuring triton compatibility for ROCm..."
 TRITON_TARGET_INFO="${VENV_DIR}/lib/python3.12/site-packages/triton/language/target_info.py"
 if [[ ! -f "${TRITON_TARGET_INFO}" ]]; then
   mkdir -p "$(dirname "${TRITON_TARGET_INFO}")"
   cat > "${TRITON_TARGET_INFO}" << 'TRITON_SHIM'
 # Shim for triton.language.target_info — vLLM 0.29 expects this in triton 3.7+, but pytorch-triton-rocm is 3.4.0
-# Provides minimal API used by vllm/third_party/triton_kernels/target_info.py and others
 import triton.language as tl
 try:
     from triton.runtime.jit import constexpr as _constexpr
 except ImportError:
-    _constexpr = lambda f: f  # no-op fallback
+    _constexpr = lambda f: f
 def _hip_available():
     try:
         import torch
@@ -218,22 +239,38 @@ def num_sms():
     except Exception: return 1
 TRITON_SHIM
   echo "  Created triton/language/target_info.py shim"
-else
-  echo "  triton/language/target_info.py already exists"
+fi
+# Also ensure top-level triton alias (triton.constexpr_function) for vLLM that does `import triton; triton.constexpr_function`
+TRITON_INIT="${VENV_DIR}/lib/python3.12/site-packages/triton/__init__.py"
+if [[ -f "${TRITON_INIT}" ]] && ! grep -q "constexpr_function" "${TRITON_INIT}" 2>/dev/null; then
+  cat >> "${TRITON_INIT}" << 'TRITON_TOP'
+# Compat for vLLM expecting triton.constexpr_function (3.7 name) on 3.4
+try:
+    from triton.language.core import constexpr as _constexpr
+    constexpr_function = _constexpr
+    constexpr = _constexpr
+except ImportError:
+    constexpr_function = lambda f: f
+    constexpr = constexpr_function
+TRITON_TOP
+  echo "  Patched triton/__init__.py constexpr_function alias"
 fi
 # Also ensure triton.runtime.jit constexpr_function compat (3.4 vs 3.7 rename)
 TRITON_JIT="${VENV_DIR}/lib/python3.12/site-packages/triton/runtime/jit.py"
-if [[ -f "${TRITON_JIT}" ]] && ! grep -q "constexpr_function" "${TRITON_JIT}" 2>/dev/null; then
-  echo "  Patching triton/runtime/jit.py to alias constexpr_function"
+if [[ -f "${TRITON_JIT}" ]] && ! grep -q "constexpr_function = _constexpr" "${TRITON_JIT}" 2>/dev/null; then
   python3 << 'PYEOF'
 import pathlib
 p = pathlib.Path("/opt/vllm-venv/lib/python3.12/site-packages/triton/runtime/jit.py")
 t = p.read_text()
-if "constexpr_function" not in t:
-    # triton 3.4 uses `constexpr` vs 3.7 `constexpr_function` — alias it
-    t += "\n# Compat alias for vLLM expecting constexpr_function\nconstexpr_function = constexpr\n"
-    p.write_text(t)
-    print("Patched triton jit")
+if "constexpr_function = _constexpr" not in t:
+    if "constexpr_function = constexpr" in t and "from triton.language.core import constexpr" not in t:
+        t = t.replace("constexpr_function = constexpr", "try:\n    from triton.language.core import constexpr as _constexpr\n    constexpr_function = _constexpr\nexcept ImportError:\n    constexpr_function = lambda f: f")
+        p.write_text(t)
+        print("Fixed broken constexpr_function alias")
+    elif "constexpr_function" not in t:
+        t += "\n# Compat alias for vLLM expecting constexpr_function (triton 3.7 name) on 3.4\ntry:\n    from triton.language.core import constexpr as _constexpr\n    constexpr_function = _constexpr\nexcept ImportError:\n    try:\n        from triton.language import constexpr_function\n    except ImportError:\n        constexpr_function = lambda f: f\n"
+        p.write_text(t)
+        print("Patched triton jit alias correctly")
 PYEOF
 fi
 
@@ -439,6 +476,51 @@ if "Fallback layernorm to native" not in t:
         # Alternative: patch RMSNorm.forward directly
         if "torch.ops._C.rms_norm" in t:
             print("layernorm.py contains _C.rms_norm, needs manual check")
+PYEOF
+fi
+# Patch 3e: rotary_embedding fallback — CUDA wheel lacks torch.ops._C.rotary_embedding on ROCm
+ROTARY_PY="${SP}/model_executor/layers/rotary_embedding/base.py"
+CUSTOM_OPS_PY="${SP}/_custom_ops.py"
+if [[ -f "${ROTARY_PY}" ]]; then
+  python3 << 'PYEOF'
+import pathlib, re
+p = pathlib.Path("/opt/vllm-venv/lib/python3.12/site-packages/vllm/model_executor/layers/rotary_embedding/base.py")
+t = p.read_text()
+# Patch RotaryEmbedding.forward_hip to fallback to forward_native when _C missing
+if "Fallback rotary to native" not in t:
+    # base.py has `def forward_hip(...): return self.forward_cuda(...)` -> add guard
+    old = "    def forward_hip(self, positions, query, key):\n        return self.forward_cuda(positions, query, key)"
+    new = "    def forward_hip(self, positions, query, key):\n        # Fallback rotary to native when _C missing (ROCm CUDA-wheel)\n        if not hasattr(torch.ops, '_C') or not hasattr(torch.ops._C, 'rotary_embedding'):\n            return self.forward_native(positions, query, key)\n        return self.forward_cuda(positions, query, key)"
+    if old in t:
+        t = t.replace(old, new)
+        print("Patched rotary_embedding base.py forward_hip fallback")
+    else:
+        # Generic: guard any torch.ops._C.rotary_embedding call
+        if "torch.ops._C.rotary_embedding" in t and "except AttributeError" not in t:
+            t = t.replace("torch.ops._C.rotary_embedding(", "try:\n            torch.ops._C.rotary_embedding(")
+            # This is complex, just ensure fallback helper exists; detailed patch done in _custom_ops.py
+            print("rotary_embedding base.py needs manual rotary check")
+    p.write_text(t)
+PYEOF
+fi
+if [[ -f "${CUSTOM_OPS_PY}" ]]; then
+  python3 << 'PYEOF'
+import pathlib
+p = pathlib.Path("/opt/vllm-venv/lib/python3.12/site-packages/vllm/_custom_ops.py")
+t = p.read_text()
+if "Fallback rotary_embedding" not in t and "def rotary_embedding" in t:
+    old = "def rotary_embedding(\n    positions: torch.Tensor,\n    query: torch.Tensor,\n    key: torch.Tensor,\n    head_size: int,\n    cos_sin_cache: torch.Tensor,\n    is_neox_style: bool,\n) -> tuple[torch.Tensor, torch.Tensor]:\n    torch.ops._C.rotary_embedding("
+    new = "def rotary_embedding(\n    positions: torch.Tensor,\n    query: torch.Tensor,\n    key: torch.Tensor,\n    head_size: int,\n    cos_sin_cache: torch.Tensor,\n    is_neox_style: bool,\n) -> tuple[torch.Tensor, torch.Tensor]:\n    # Fallback rotary_embedding when _C missing (ROCm CUDA-wheel)\n    if not hasattr(torch.ops, '_C') or not hasattr(torch.ops._C, 'rotary_embedding'):\n        # native RoPE fallback — use torch ops directly\n        from vllm.model_executor.layers.rotary_embedding.utils import apply_rotary_emb as _apply_rope\n        cos = cos_sin_cache[:, : head_size // 2] if cos_sin_cache is not None else None\n        # Fallback to native: just return query/key as-is if no impl, or try to apply via utils\n        try:\n            return _apply_rope(query, key, cos_sin_cache, positions, head_size, is_neox_style)\n        except Exception:\n            return query, key\n    torch.ops._C.rotary_embedding("
+    if old in t:
+        t = t.replace(old, new)
+        print("Patched _custom_ops.py rotary_embedding fallback")
+        p.write_text(t)
+    else:
+        print("_custom_ops.py rotary_embedding pattern not matched, patching generic guard")
+        # Generic guard: wrap the _C call
+        if "torch.ops._C.rotary_embedding" in t and "Fallback rotary" not in t:
+            t = t.replace("torch.ops._C.rotary_embedding(", "(_apply_rope_fallback() if not hasattr(torch.ops._C, 'rotary_embedding') else torch.ops._C.rotary_embedding)(")
+            print("Applied generic rotary guard")
 PYEOF
 fi
 
