@@ -1,7 +1,7 @@
 # hlh-ai-engine-vllm
 
 Infrastructure-as-Code for the HLH vLLM inference engine. Deploys **native vLLM (no docker)**
-as a Proxmox LXC container with AMD GPU passthrough (Radeon 890M, gfx1150/Strix Halo),
+as a Proxmox LXC container with AMD GPU passthrough (Radeon 890M, gfx1150/Strix Point),
 serving local safetensors models from the shared `/srv/ai/models` pool.
 
 ## Executive Summary
@@ -122,12 +122,12 @@ No third file — simplicity over ceremony.
 hlh-ai-engine-vllm/
 ├── deploy-hlh-ai-engine-vllm.sh    # create: LXC 113 + GPU passthrough + host ROCm + pct push configure
 ├── configure-hlh-ai-engine-vllm.sh # configure: runs inside LXC — ROCm + venv + vLLM + /etc/vllm.env + vllm.service :8000
+│                                   # SBOM: #1 ROCm 10.0.0 git@github.com:ROCm/ROCm.git, #2 vLLM 0.29.0 git@github.com:vllm-project/vllm.git
 ├── 00_BACKLOG.md
 ├── 10_ACTIVE.md
 ├── 90_DONE.md
 ├── CHANGELOG.md
 ├── checkpoint.md                    # historical: venv-era ROCm debugging
-├── vllm-lemonade.sh                 # one-off Lemonade-based installer (experiment, not the deploy path)
 └── README.md
 ```
 

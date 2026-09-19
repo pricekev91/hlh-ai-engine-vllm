@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# configure-ai-engine-inside-lxc.sh (vLLM native variant)
-# Version: 0.3.3
+# configure-hlh-ai-engine-vllm.sh — 2-file KISS, does everything once LXC is up
+# Version: 0.3.4
 # Description: Bootstrap native vLLM (no docker) on Ubuntu 24.04 LXC
-#              with ROCm userspace installed in-container (gfx1150).
-# Target GPU: AMD Radeon 890M (gfx1150/Strix Halo) on Proxmox 9.x privileged LXC
+#              with ROCm userspace installed in-container (gfx1150 Strix Point).
+# Target GPU: AMD Radeon 890M (gfx1150/Strix Point) on Proxmox 9.x privileged LXC
+# Software Bill of Materials — simple git pulls, no 3rd-party bundles (KISS):
+#   #1 ROCm 10.0.0 — git@github.com:ROCm/ROCm.git (apt mirror https://stable.repo.amd.com/rocm/core/packages)
+#   #2 vLLM 0.29.0 — git@github.com:vllm-project/vllm.git (pip vllm[rocm] built from that repo; torch ROCm 2.8.0+rocm6.4 from https://github.com/pytorch/pytorch)
+#      No Lemonade, no prebuilt bundles, no Docker — direct GitHub sources only. Slower compile, less brittle.
 # Requirements: Run as root inside privileged LXC with GPU passthrough
 #               (/dev/dri/card0, renderD128, /dev/kfd) and /srv/ai/models bind mount
 # Changelog:

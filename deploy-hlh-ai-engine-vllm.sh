@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# deploy-hlh-ai-engine-vllm.sh — 2-file KISS, creates LXC
+# Software Bill of Materials — simple git pulls, no 3rd-party bundles (KISS):
+#   #1 ROCm 10.0.0 — git@github.com:ROCm/ROCm.git (host driver via stable.repo.amd.com)
+#   #2 vLLM 0.29.0 — git@github.com:vllm-project/vllm.git (installed inside LXC via configure script)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -9,11 +13,11 @@ usage() {
 Usage:
 	./deploy-hlh-ai-engine-vllm.sh [--update] [--destroy]
 
-This is the direct Proxmox bootstrap path (pure bash):
+This is the direct Proxmox bootstrap path (pure bash, 2-file KISS):
 	1) Create privileged LXC 113 (hlh-ai-engine-vllm)
-      2) Configure GPU passthrough (890M gfx1150 only)
+      2) Configure GPU passthrough (890M gfx1150 Strix Point only)
       3) Start container
-      4) Push/run in-container bootstrap script (native vLLM install + vllm.service running
+      4) Push/run configure-hlh-ai-engine-vllm.sh inside LXC (native vLLM install + vllm.service running
          vLLM serving /srv/ai/models/Qwen3.5-9B — phase 1)
 
 If LXC 113 already exists, interactive prompt offers:
