@@ -76,8 +76,8 @@ Or manually on the LXC:
 
 ```bash
 # from repo root, on the Proxmox host:
-pct push 113 configure-ai-engine-inside-lxc.sh /root/ai-engine-bootstrap/configure-ai-engine-inside-lxc.sh --perms 0755
-pct exec 113 -- env ROCM_VERSION=10.0.0 bash /root/ai-engine-bootstrap/configure-ai-engine-inside-lxc.sh
+pct push 113 configure-hlh-ai-engine-vllm.sh /root/ai-engine-bootstrap/configure-hlh-ai-engine-vllm.sh --perms 0755
+pct exec 113 -- env ROCM_VERSION=10.0.0 bash /root/ai-engine-bootstrap/configure-hlh-ai-engine-vllm.sh
 ```
 
 Switch the loaded model (inside the LXC):
@@ -95,19 +95,12 @@ curl -s http://192.168.1.13:8000/v1/chat/completions -H 'Content-Type: applicati
   -d '{"model":"qwen3.5-9b","messages":[{"role":"user","content":"Say hi in one word."}],"max_tokens":16}'
 ```
 
-## Deployment Model
+## Deployment Model — 2-file KISS
 
-Deployment and configuration are separate phases (pure bash):
+* `deploy-hlh-ai-engine-vllm.sh` — **create**: privileged LXC `113`, GPU passthrough (`card0`+`renderD128`+`kfd` only), host ROCm check/upgrade (`stable.repo.amd.com` for 10.x), then `pct push` `configure-hlh-ai-engine-vllm.sh` + `pct exec` it (`ROCM_VERSION` forwarded). Handles `y`/`u`/`n` re-deploy prompt.
+* `configure-hlh-ai-engine-vllm.sh` — **configure** (runs inside LXC): installs ROCm userspace, Python venv, vLLM via pip, writes `/etc/vllm.env` + `/usr/local/bin/vllm-run.sh` + `vllm.service`, starts vLLM, health-probes. Callable via `deploy --update`, manually `pct push`+`pct exec`, or `ssh`.
 
-1. **Provisioning**: `deploy-hlh-ai-engine-vllm.sh` creates privileged LXC `113`, wires GPU
-   passthrough (`card0` + `renderD128` + `kfd` only — K80 nodes excluded so ROCm never enumerates
-   an unsupported device), checks/upgrades the **host** ROCm if the major mismatches
-   (`stable.repo.amd.com` for 10.x, `packages-multi-arch` for 7.x), and pushes
-   `configure-ai-engine-inside-lxc.sh` via `pct push` (`ROCM_VERSION` forwarded).
-2. **Configuration**: `configure-hlh-ai-engine-vllm.sh` (or `deploy --update`) runs
-   `configure-ai-engine-inside-lxc.sh` inside the container via `pct push`+`pct exec` (or `scp`+`ssh` fallback):
-   installs ROCm userspace, Python venv, vLLM via pip, writes `/etc/vllm.env` + `/usr/local/bin/vllm-run.sh` + `vllm.service`,
-   starts vLLM, health-probes.
+No third file — simplicity over ceremony.
 
 ## Runtime Contract
 
@@ -123,19 +116,18 @@ Deployment and configuration are separate phases (pure bash):
 | In-LXC ROCm | Userspace installed matching host version (default `10.0.0`) |
 | Open WebUI | **not configured — phase 10** |
 
-## Repository Layout
+## Repository Layout — 2-file KISS
 
 ```
 hlh-ai-engine-vllm/
-├── deploy-hlh-ai-engine-vllm.sh          # LXC 113 creation + GPU passthrough + host ROCm check + bootstrap push
-├── configure-hlh-ai-engine-vllm.sh       # pure bash reconfiguration (pct push/exec)
-├── configure-ai-engine-inside-lxc.sh     # in-LXC bootstrap: ROCm + venv + vLLM + /etc/vllm.env + vllm-run.sh + vllm.service :8000
+├── deploy-hlh-ai-engine-vllm.sh    # create: LXC 113 + GPU passthrough + host ROCm + pct push configure
+├── configure-hlh-ai-engine-vllm.sh # configure: runs inside LXC — ROCm + venv + vLLM + /etc/vllm.env + vllm.service :8000
 ├── 00_BACKLOG.md
 ├── 10_ACTIVE.md
 ├── 90_DONE.md
 ├── CHANGELOG.md
-├── checkpoint.md                          # historical: venv-era ROCm debugging
-├── vllm-lemonade.sh                       # one-off Lemonade-based installer (experiment, not the deploy path)
+├── checkpoint.md                    # historical: venv-era ROCm debugging
+├── vllm-lemonade.sh                 # one-off Lemonade-based installer (experiment, not the deploy path)
 └── README.md
 ```
 

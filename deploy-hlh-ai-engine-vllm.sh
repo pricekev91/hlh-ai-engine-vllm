@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BOOTSTRAP_SCRIPT="${SCRIPT_DIR}/configure-ai-engine-inside-lxc.sh"
+BOOTSTRAP_SCRIPT="${SCRIPT_DIR}/configure-hlh-ai-engine-vllm.sh"
 
 usage() {
 	cat <<'EOF'
@@ -312,8 +312,8 @@ if [[ "${UPDATE_IN_PLACE}" == "true" ]]; then
 	fi
 	echo "[5/6] Running in-container bootstrap (update mode — patch vLLM in place)..."
 	pct exec "${LXC_ID}" -- mkdir -p /root/ai-engine-bootstrap
-	pct push "${LXC_ID}" "$BOOTSTRAP_SCRIPT" /root/ai-engine-bootstrap/configure-ai-engine-inside-lxc.sh --perms 0755
-	pct exec "${LXC_ID}" -- env ROCM_VERSION="${ROCM_VERSION}" VLLM_DEFAULT_MODEL="${VLLM_DEFAULT_MODEL}" bash /root/ai-engine-bootstrap/configure-ai-engine-inside-lxc.sh
+	pct push "${LXC_ID}" "$BOOTSTRAP_SCRIPT" /root/ai-engine-bootstrap/configure-hlh-ai-engine-vllm.sh --perms 0755
+	pct exec "${LXC_ID}" -- env ROCM_VERSION="${ROCM_VERSION}" VLLM_DEFAULT_MODEL="${VLLM_DEFAULT_MODEL}" bash /root/ai-engine-bootstrap/configure-hlh-ai-engine-vllm.sh
 	echo "[6/6] Update complete. LXC ${LXC_ID} (${LXC_NAME}) patched in place (no recreate)."
 	echo "Model storage: ${MODEL_HOST_DIR} (host) <-> ${MODEL_LXC_DIR} (container) on ${POOL}"
 	echo "Backend      : ${VLLM_BACKEND} (gfx1150, ROCm HIP native in-container)"
@@ -403,8 +403,8 @@ fi
 
 echo "[5/6] Running in-container bootstrap (native vLLM install)..."
 pct exec "${LXC_ID}" -- mkdir -p /root/ai-engine-bootstrap
-pct push "${LXC_ID}" "$BOOTSTRAP_SCRIPT" /root/ai-engine-bootstrap/configure-ai-engine-inside-lxc.sh --perms 0755
-pct exec "${LXC_ID}" -- env ROCM_VERSION="${ROCM_VERSION}" VLLM_DEFAULT_MODEL="${VLLM_DEFAULT_MODEL}" bash /root/ai-engine-bootstrap/configure-ai-engine-inside-lxc.sh
+pct push "${LXC_ID}" "$BOOTSTRAP_SCRIPT" /root/ai-engine-bootstrap/configure-hlh-ai-engine-vllm.sh --perms 0755
+pct exec "${LXC_ID}" -- env ROCM_VERSION="${ROCM_VERSION}" VLLM_DEFAULT_MODEL="${VLLM_DEFAULT_MODEL}" bash /root/ai-engine-bootstrap/configure-hlh-ai-engine-vllm.sh
 
 echo "[6/6] Deployment complete. LXC ${LXC_ID} (${LXC_NAME}) is running."
 echo "Model storage: ${MODEL_HOST_DIR} (host) <-> ${MODEL_LXC_DIR} (container) on ${POOL}"
