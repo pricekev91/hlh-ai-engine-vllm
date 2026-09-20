@@ -190,7 +190,9 @@ for i in $(seq 1 12); do
 done
 apt-get update
 apt-get install -y --no-install-recommends curl ca-certificates git openssh-server \
-  libgomp1 libnuma1 libatomic1 libdrm2 python3-dev build-essential
+  libgomp1 libnuma1 libatomic1 libdrm2 python3-dev build-essential \
+  libopenmpi3 openmpi-bin libopenmpi-dev 2>&1 || true
+# OpenMPI provides libmpi.so.40 / libmpi_cxx.so.40 required by torch's bundled deps
 
 # Resolve versions AFTER network + curl are ready (single source of truth — deploy does same, but we trust pinned)
 echo "[1/8] Resolving vLLM + ROCm variant (pinned: VLLM_VERSION=${VLLM_VERSION:-auto} VLLM_ROCM_VARIANT=${VLLM_ROCM_VARIANT:-auto})..."
@@ -214,6 +216,38 @@ echo "  Resolved Python        : ${PYTHON_VERSION}"
 echo "  Wheels index           : ${WHEELS_BASE}/${RESOLVED_VLLM_VERSION}/${RESOLVED_VARIANT}/"
 
 VLLM_INDEX="${WHEELS_BASE}/${RESOLVED_VLLM_VERSION}/${RESOLVED_VARIANT}/"
+
+# ROCm runtime libs (needed by torch wheels — they link to host libs like MIOpen/rocBLAS)
+# This is additive, warn-only; torch import gate below will fail loud if still missing.
+_ROCM_DOTTED="$(variant_to_dotted "${RESOLVED_VARIANT}")"
+_ROCM_MAJOR="$(echo "${_ROCM_DOTTED}" | cut -d. -f1)"
+echo "[1/8] Installing ROCm runtime libs for ${_ROCM_DOTTED} (if needed)..."
+if [[ ! -f /etc/apt/sources.list.d/rocm.list ]]; then
+  mkdir -p /etc/apt/keyrings
+  if [[ "${_ROCM_MAJOR}" -ge 10 ]] 2>/dev/null; then
+    echo "  Adding ROCm apt repo for ${_ROCM_DOTTED} (stable.repo.amd.com) ..."
+    wget -qO - https://stable.repo.amd.com/rocm/gpg/packages.gpg | gpg --dearmor | tee /etc/apt/keyrings/amdrocm.gpg > /dev/null 2>&1 || true
+    echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/amdrocm.gpg] https://stable.repo.amd.com/rocm/core/packages/ubuntu2404 stable main" > /etc/apt/sources.list.d/rocm.list
+  else
+    echo "  Adding ROCm apt repo for ${_ROCM_DOTTED} (repo.radeon.com) ..."
+    wget -qO - https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor | tee /etc/apt/keyrings/amdrocm.gpg > /dev/null 2>&1 || \
+    wget -qO - https://repo.amd.com/rocm/rocm.gpg.key | gpg --dearmor | tee /etc/apt/keyrings/amdrocm.gpg > /dev/null 2>&1 || true
+    _CODENAME="$(. /etc/os-release 2>/dev/null; echo "${VERSION_CODENAME:-noble}")"
+    [[ -z "${_CODENAME}" ]] && _CODENAME="noble"
+    # Try 7.2 (major.minor) first, then full dotted for edge cases
+    echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/amdrocm.gpg] https://repo.radeon.com/rocm/apt/${_ROCM_DOTTED%.*} ${_CODENAME} main" > /etc/apt/sources.list.d/rocm.list 2>&1 || \
+    echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/amdrocm.gpg] https://repo.radeon.com/rocm/apt/${_ROCM_DOTTED} ${_CODENAME} main" > /etc/apt/sources.list.d/rocm.list
+  fi
+  echo 'APT::Key::GPGCommand "/usr/bin/gpg";' > /etc/apt/apt.conf.d/99gpg-override 2>&1 || true
+  apt-get update -o Acquire::Check-Valid-Until=false 2>&1 | tail -20 || true
+fi
+echo "  Installing ROCm libs for ${_ROCM_DOTTED} (warn-only)..."
+# Attempt rocm-core meta, fallback to individual libs that ldd reported missing
+if ! apt-get install -y --no-install-recommends rocm-core rocm-hip-runtime rocblas hipblas miopen-hip rccl 2>&1 | tail -40; then
+  echo "  rocm-core meta failed, trying individual ROCm libs..."
+  apt-get install -y --no-install-recommends hip-runtime-amd rocblas hipblas hipblaslt hipfft hiprand hipsolver hipsparse hipsparselt rccl miopen-hip roctracer rocm-smi-lib 2>&1 | tail -40 || true
+fi
+ldconfig 2>&1 || true
 
 if [[ "${ENABLE_ROOT_PASSWORD_SSH}" == "1" ]]; then
   mkdir -p /etc/ssh/sshd_config.d
