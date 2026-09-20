@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # deploy-hlh-ai-engine-vllm.sh — 2-file KISS, creates LXC
-# Software Bill of Materials — simple git pulls, no 3rd-party bundles (KISS):
-#   #1 ROCm 10.0.0 — git@github.com:ROCm/ROCm.git (host driver via stable.repo.amd.com)
-#   #2 vLLM 0.29.0 — git@github.com:vllm-project/vllm.git (installed inside LXC via configure script)
+# Software Bill of Materials — auto-resolved at deploy time (KISS, tok/s first):
+#   vLLM latest stable + matching ROCm variant from https://wheels.vllm.ai/rocm/
+#   Today: vLLM 0.29.0 + rocm723 (ROCm 7.2.3) — when 0.30.0 ships with rocm1000, it auto-picks 10.0.0.
+#   Native installs in LXC via uv (no docker): vllm + open-webui. Host provides amdgpu kernel driver.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,11 +15,12 @@ Usage:
 	./deploy-hlh-ai-engine-vllm.sh [--update] [--destroy]
 
 This is the direct Proxmox bootstrap path (pure bash, 2-file KISS):
-	1) Create privileged LXC 113 (hlh-ai-engine-vllm)
-      2) Configure GPU passthrough (890M gfx1150 Strix Point only)
-      3) Start container
-      4) Push/run configure-hlh-ai-engine-vllm.sh inside LXC (native vLLM install + vllm.service running
-         vLLM serving /srv/ai/models/Qwen3.5-9B — phase 1)
+	1) Resolve latest stable vLLM + matching ROCm variant from wheels.vllm.ai (single source of truth)
+	2) Create privileged LXC 113 (hlh-ai-engine-vllm) with host ROCm check (ensures host has what vLLM needs)
+	3) Configure GPU passthrough (890M gfx1150 Strix Point only)
+	4) Start container
+	5) Push/run configure-hlh-ai-engine-vllm.sh inside LXC (native vLLM + native Open WebUI via uv)
+	   vLLM serving /srv/ai/models/Qwen3.5-9B on :8000, WebUI on :80
 
 If LXC 113 already exists, interactive prompt offers:
   y = destroy & recreate from scratch (full rebuild, ~10-20 min)
@@ -28,11 +30,19 @@ If LXC 113 already exists, interactive prompt offers:
 Flags:
   --update    Non-interactive: update in-place if LXC exists (same as answering 'u')
   --destroy   Non-interactive: destroy & recreate if LXC exists (same as answering 'y')
+  --help      Show this help
+
+Env overrides (forwarded into LXC bootstrap):
+  VLLM_VERSION=x.y.z          Pin vLLM version (default: auto-resolve latest stable from PyPI)
+  VLLM_ROCM_VARIANT=rocm723    Pin ROCm variant (default: auto-resolve highest rocm* for that version)
+  ROCM_VERSION=x.y.z           Legacy back-compat: if set, derived to VLLM_ROCM_VARIANT (7.2.3->723)
+  PYTHON_VERSION=3.12          Python for venvs (wheels are cp312, must be 3.12)
 
 Examples:
-  ./deploy-hlh-ai-engine-vllm.sh              # interactive Y/N/U if 113 exists
+  ./deploy-hlh-ai-engine-vllm.sh              # interactive Y/N/U if 113 exists, auto-resolves 0.29.0/rocm723
   ./deploy-hlh-ai-engine-vllm.sh --update     # fast patch path
   ./deploy-hlh-ai-engine-vllm.sh --destroy    # full rebuild
+  VLLM_VERSION=0.29.0 VLLM_ROCM_VARIANT=rocm723 ./deploy-hlh-ai-engine-vllm.sh --update   # pin
 EOF
 }
 
@@ -48,13 +58,12 @@ LXC_MEMORY="49152"
 LXC_CORES="12"
 LXC_IP_CONFIG="192.168.1.13/24"
 LXC_GATEWAY="192.168.1.1"
-# ROCm version tracks latest stable — default is latest upstream (10.0.0 2026-08-26); override with env: ROCM_VERSION=7.14.1 ./deploy-hlh-ai-engine-vllm.sh
-# Never pinned — deploy always prints the version it will build (see header/footer) and forwards ROCM_VERSION into the LXC.
-ROCM_VERSION="${ROCM_VERSION:-10.0.0}"
-# Phase 1: vLLM runs natively in LXC (no docker). Host ROCm stack provides amdgpu kernel driver/firmware.
 VLLM_MODEL_DIR="/srv/ai/models"
 VLLM_DEFAULT_MODEL="Qwen3.5-9B"
-VLLM_BACKEND="vLLM ROCm native serving ${VLLM_MODEL_DIR}/${VLLM_DEFAULT_MODEL}"
+WEBUI_PORT="80"
+
+WHEELS_BASE="https://wheels.vllm.ai/rocm"
+PYPI_JSON="https://pypi.org/pypi/vllm/json"
 
 NONINTERACTIVE_MODE=""
 while [[ $# -gt 0 ]]; do
@@ -81,169 +90,272 @@ done
 command -v pct >/dev/null 2>&1 || { echo "ERROR: pct command not found. Run on Proxmox host." >&2; exit 1; }
 [[ -f "$BOOTSTRAP_SCRIPT" ]] || { echo "ERROR: Bootstrap script not found: $BOOTSTRAP_SCRIPT" >&2; exit 1; }
 
-echo "=== hlh-ai-engine-vllm deploy ==="
+# --- Auto-resolve vLLM + ROCm variant (single source of truth, same logic as configure) ---
+resolve_vllm_version() {
+	local ver="${1:-}"
+	if [[ -n "$ver" ]]; then
+		ver="$(echo "$ver" | tr -d '[:space:]')"
+		if curl -fsSL -o /dev/null "${WHEELS_BASE}/${ver}/" 2>/dev/null; then
+			echo "$ver"; return 0
+		fi
+		echo "FATAL: pinned VLLM_VERSION=${ver} has no wheels at ${WHEELS_BASE}/${ver}/" >&2
+		exit 1
+	fi
+	local latest
+	latest="$(curl -fsSL "${PYPI_JSON}" 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin)['info']['version'])" 2>/dev/null || true)"
+	if [[ -z "$latest" ]]; then
+		echo "FATAL: could not fetch latest vLLM version from ${PYPI_JSON}" >&2
+		exit 1
+	fi
+	if curl -fsSL -o /dev/null "${WHEELS_BASE}/${latest}/" 2>/dev/null; then
+		echo "$latest"; return 0
+	fi
+	echo "PyPI latest ${latest} has no wheels, walking releases..." >&2
+	local fallback
+	fallback="$(curl -fsSL "${PYPI_JSON}" 2>/dev/null | python3 -c "
+import json, re
+data=json.load(__import__('sys').stdin)
+vers=list(data['releases'].keys())
+def key(v):
+    m=re.match(r'^([0-9.]+)', v)
+    if not m: return (-1,)
+    return tuple(int(x) for x in m.group(1).split('.'))
+for v in sorted(vers, key=key, reverse=True):
+    if re.search(r'rc|dev|post|a|b', v): continue
+    print(v)
+" 2>/dev/null | head -20)"
+	while IFS= read -r v; do
+		[[ -z "$v" ]] && continue
+		if curl -fsSL -o /dev/null "${WHEELS_BASE}/${v}/" 2>/dev/null; then
+			echo "$v"; return 0
+		fi
+	done <<< "$fallback"
+	echo "FATAL: no PyPI release has wheels at ${WHEELS_BASE}/" >&2
+	exit 1
+}
+
+resolve_rocm_variant() {
+	local ver="$1" pin="${2:-}"
+	if [[ -n "$pin" ]]; then
+		pin="$(echo "$pin" | sed -E 's/^rocm//; s/[^0-9]//g')"
+		local p="rocm${pin}"
+		if curl -fsSL -o /dev/null "${WHEELS_BASE}/${ver}/${p}/" 2>/dev/null; then
+			echo "$p"; return 0
+		fi
+		echo "FATAL: pinned VLLM_ROCM_VARIANT=${p} not found at ${WHEELS_BASE}/${ver}/${p}/" >&2
+		exit 1
+	fi
+	local listing
+	listing="$(curl -fsSL "${WHEELS_BASE}/${ver}/" 2>/dev/null || true)"
+	local variants
+	variants="$(echo "$listing" | grep -oE 'rocm[0-9]+/' | tr -d '/' | sort -u)"
+	if [[ -z "$variants" ]]; then
+		echo "FATAL: no rocm variant found at ${WHEELS_BASE}/${ver}/" >&2
+		exit 1
+	fi
+	echo "$variants" | sed -E 's/rocm//' | sort -n | tail -1 | awk '{print "rocm"$1}'
+}
+
+variant_to_dotted() {
+	local v="${1#rocm}"
+	if [[ ${#v} -eq 3 ]]; then
+		echo "${v:0:1}.${v:1:1}.${v:2:1}"
+	elif [[ ${#v} -eq 4 ]]; then
+		echo "${v:0:2}.${v:2:1}.${v:3:1}"
+	else
+		echo "$v"
+	fi
+}
+
+# Back-compat: ROCM_VERSION env -> VLLM_ROCM_VARIANT if user set it and didn't pin variant
+if [[ -n "${ROCM_VERSION:-}" && -z "${VLLM_ROCM_VARIANT:-}" ]]; then
+	echo "NOTE: ROCM_VERSION=${ROCM_VERSION} is legacy — deriving VLLM_ROCM_VARIANT from it." >&2
+	# 7.2.3 -> 723, 10.0.0 -> 1000
+	VLLM_ROCM_VARIANT="$(echo "${ROCM_VERSION}" | awk -F. '{printf "%s%s%s", $1, $2, $3}')"
+	# For 10.0.0 the above gives 1000 correct; for 7.2.3 gives 723
+	if [[ "${ROCM_VERSION}" == "10.0.0" ]]; then VLLM_ROCM_VARIANT="1000"; fi
+	# Normalize to rocm prefix
+	if [[ "${VLLM_ROCM_VARIANT}" != rocm* ]]; then VLLM_ROCM_VARIANT="rocm${VLLM_ROCM_VARIANT}"; fi
+	echo "  Derived VLLM_ROCM_VARIANT=${VLLM_ROCM_VARIANT}" >&2
+fi
+
+RESOLVED_VLLM_VERSION="$(resolve_vllm_version "${VLLM_VERSION:-}")"
+RESOLVED_VARIANT="$(resolve_rocm_variant "${RESOLVED_VLLM_VERSION}" "${VLLM_ROCM_VARIANT:-}")"
+RESOLVED_ROCM_DOTTED="$(variant_to_dotted "${RESOLVED_VARIANT}")"
+
+VLLM_BACKEND="vLLM ${RESOLVED_VLLM_VERSION} ${RESOLVED_VARIANT} (ROCm ${RESOLVED_ROCM_DOTTED}) native + Open WebUI native :${WEBUI_PORT}"
+
+echo "=== hlh-ai-engine-vllm deploy v0.5.0 ==="
 echo "  LXC          : ${LXC_ID} (${LXC_NAME}) ${LXC_IP_CONFIG} on ${POOL}"
-echo "  Host ROCm    : ${ROCM_VERSION} target (override: ROCM_VERSION=x.y.z ./deploy-hlh-ai-engine-vllm.sh)"
+echo "  vLLM         : ${RESOLVED_VLLM_VERSION} (PyPI latest stable, auto-resolved)"
+echo "  ROCm variant : ${RESOLVED_VARIANT} -> ${RESOLVED_ROCM_DOTTED} (from ${WHEELS_BASE}/${RESOLVED_VLLM_VERSION}/${RESOLVED_VARIANT}/)"
 echo "  Backend      : ${VLLM_BACKEND}"
+echo "  vLLM index   : ${WHEELS_BASE}/${RESOLVED_VLLM_VERSION}/${RESOLVED_VARIANT}/"
+echo "  Install cmd  : uv pip install vllm --extra-index-url ${WHEELS_BASE}/${RESOLVED_VLLM_VERSION}/${RESOLVED_VARIANT}/"
 echo "  Model dir    : ${MODEL_HOST_DIR} -> ${MODEL_LXC_DIR} (default model: ${VLLM_DEFAULT_MODEL})"
+echo "  WebUI        : native at http://192.168.1.13:${WEBUI_PORT}/ (no docker)"
 echo "  Note         : sibling LXC 112 (hlh-ai-engine, llama.cpp) shares the iGPU — it is NOT touched by this deploy."
 echo ""
 
-# --- Host ROCm upgrade (prox01) — 7.14 is old vs 10.0.0 ---
-# The Proxmox host driver must match the LXC user-space ROCm major. Host was on
-# 7.14.0 (packages-multi-arch/debian13) while LXC 112 wants 10.0.0 (stable.repo.amd.com).
-# Mismatch causes inside LXC: rocm-smi 'No GPUs', rocminfo 'Invalid argument', ggml 'no ROCm device'.
-# Prompt and upgrade the host first, before LXC creation.
+# --- Host ROCm / driver check — ensure host has what wheels need ---
+# Wheels bundle userspace, but host must have amdgpu kernel driver/firmware behind /dev/kfd.
+# If host has stale amdrocm packages (orphan rocm-smi), warn. Confirm host driver version matches resolved ROCm.
 get_host_rocm_version() {
-  local ver=""
-  # Prefer installed package version (e.g. 7.14.0-3, 10.0.0-4)
-  # ROCm 10.x packages (prioritized over 7.x since 10.x is newer):
-  #   amdrocm10.0, amdrocm-core10.0, amdrocm-base10.0, etc.
-  ver="$(dpkg-query -W -f='${Version}' amdrocm10.0 2>/dev/null | cut -d- -f1)"
-  if [[ -z "$ver" ]]; then
-    ver="$(dpkg-query -W -f='${Version}' amdrocm-core10.0 2>/dev/null | cut -d- -f1)"
-  fi
-  if [[ -z "$ver" ]]; then
-    ver="$(dpkg-query -W -f='${Version}' amdrocm-base10.0 2>/dev/null | cut -d- -f1)"
-  fi
-  if [[ -z "$ver" ]]; then
-    ver="$(dpkg-query -W -f='${Version}' amdrocm-core 2>/dev/null | cut -d- -f1)"
-  fi
-  # ROCm 7.x packages (fallback)
-  if [[ -z "$ver" ]]; then
-    ver="$(dpkg -l 2>/dev/null | awk '/^ii[ ]+amdrocm-core7/{print $3}' | head -1 | cut -d- -f1)"
-  fi
-  if [[ -z "$ver" ]]; then
-    ver="$(dpkg -l 2>/dev/null | awk '/^ii[ ]+amdrocm7\.14/{print $3}' | head -1 | cut -d- -f1)"
-  fi
-  # Fallback: rocm-smi version string
-  if [[ -z "$ver" ]]; then
-    ver="$(rocm-smi --version 2>/dev/null | grep -oP '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
-  fi
-  echo "${ver:-unknown}"
+	local ver=""
+	ver="$(dpkg-query -W -f='${Version}' amdrocm10.0 2>/dev/null | cut -d- -f1)"
+	if [[ -z "$ver" ]]; then
+		ver="$(dpkg-query -W -f='${Version}' amdrocm-core10.0 2>/dev/null | cut -d- -f1)"
+	fi
+	if [[ -z "$ver" ]]; then
+		ver="$(dpkg-query -W -f='${Version}' amdrocm-base10.0 2>/dev/null | cut -d- -f1)"
+	fi
+	if [[ -z "$ver" ]]; then
+		ver="$(dpkg-query -W -f='${Version}' amdrocm-core 2>/dev/null | cut -d- -f1)"
+	fi
+	if [[ -z "$ver" ]]; then
+		ver="$(dpkg -l 2>/dev/null | awk '/^ii[ ]+amdrocm-core7/{print $3}' | head -1 | cut -d- -f1)"
+	fi
+	if [[ -z "$ver" ]]; then
+		ver="$(dpkg -l 2>/dev/null | awk '/^ii[ ]+amdrocm7\.14/{print $3}' | head -1 | cut -d- -f1)"
+	fi
+	if [[ -z "$ver" ]]; then
+		ver="$(rocm-smi --version 2>/dev/null | grep -oP '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+	fi
+	echo "${ver:-unknown}"
 }
 
 HOST_ROCM_VERSION="$(get_host_rocm_version)"
 HOST_ROCM_MAJOR="$(echo "${HOST_ROCM_VERSION}" | cut -d. -f1)"
-REQ_MAJOR="$(echo "${ROCM_VERSION}" | cut -d. -f1)"
-# Map host OS to stable repo dist name: stable uses debian13/ubuntu2404 etc, not codename trixie.
-# /etc/os-release on PVE trixie is ID=debian VERSION_ID=13 CODENAME=trixie, but stable wants debian13.
+REQ_MAJOR="$(echo "${RESOLVED_ROCM_DOTTED}" | cut -d. -f1)"
 HOST_ID="$(. /etc/os-release 2>/dev/null; echo "${ID:-}")"
 HOST_VER="$(. /etc/os-release 2>/dev/null; echo "${VERSION_ID:-}")"
 HOST_CODENAME="$(. /etc/os-release 2>/dev/null; echo "${VERSION_CODENAME:-}")"
 HOST_REPO_DIST=""
 if [[ "${HOST_ID}" == "debian" && -n "${HOST_VER}" ]]; then
-  # 13 -> debian13, 12 -> debian12 (matches https://stable.repo.amd.com/rocm/core/packages/debian13/ and legacy packages-multi-arch/debian13)
-  HOST_REPO_DIST="debian${HOST_VER%%.*}"
+	HOST_REPO_DIST="debian${HOST_VER%%.*}"
 elif [[ "${HOST_ID}" == "ubuntu" && -n "${HOST_VER}" ]]; then
-  # 24.04 -> ubuntu2404 (matches stable .../ubuntu2404)
-  HOST_REPO_DIST="ubuntu${HOST_VER//./}"
+	HOST_REPO_DIST="ubuntu${HOST_VER//./}"
 else
-  # Fallback to codename mapping
-  HOST_REPO_DIST="${HOST_CODENAME}"
-  if grep -qi "trixie" /etc/os-release 2>/dev/null; then HOST_REPO_DIST="debian13"; fi
-  if grep -qi "bookworm" /etc/os-release 2>/dev/null; then HOST_REPO_DIST="debian12"; fi
-  if grep -qi "bullseye" /etc/os-release 2>/dev/null; then HOST_REPO_DIST="debian11"; fi
+	HOST_REPO_DIST="${HOST_CODENAME}"
+	if grep -qi "trixie" /etc/os-release 2>/dev/null; then HOST_REPO_DIST="debian13"; fi
+	if grep -qi "bookworm" /etc/os-release 2>/dev/null; then HOST_REPO_DIST="debian12"; fi
 fi
 [[ -z "${HOST_REPO_DIST}" ]] && HOST_REPO_DIST="debian13"
-# Keep HOST_CODENAME for display, but use HOST_REPO_DIST for repo URL
 if [[ -z "${HOST_CODENAME}" ]]; then HOST_CODENAME="${HOST_REPO_DIST}"; fi
 
 echo "  Host ROCm    : ${HOST_ROCM_VERSION} (host driver)"
 echo "  Host OS      : ${HOST_CODENAME} / ${HOST_REPO_DIST} ($(cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d= -f2 | tr -d '\"'))"
+echo "  Required ROCm: ${RESOLVED_ROCM_DOTTED} (from ${RESOLVED_VARIANT})"
 echo ""
 
 should_upgrade_host=false
 if [[ "${HOST_ROCM_VERSION}" == "unknown" ]]; then
-  echo "WARNING: Could not detect host ROCm version — will attempt to install ${ROCM_VERSION} on host."
-  should_upgrade_host=true
+	# No amdrocm packages — check if kernel driver is sufficient (wheels bundle userspace)
+	if [[ -e /dev/kfd ]]; then
+		echo "Host has no amdrocm apt packages but /dev/kfd exists — kernel driver is likely sufficient (wheels bundle userspace)."
+		echo "  rocm-smi orphan check: $(rocm-smi --version 2>&1 | head -1 || echo 'no rocm-smi')"
+		echo "  Proceeding without host apt upgrade (use HOST_ROCM_SETUP=1 to force install ${RESOLVED_ROCM_DOTTED})."
+	else
+		echo "WARNING: Could not detect host ROCm version and /dev/kfd missing — host driver may be missing."
+		should_upgrade_host=true
+	fi
 elif [[ "${HOST_ROCM_MAJOR}" != "${REQ_MAJOR}" ]]; then
-  echo "Host ROCm major ${HOST_ROCM_MAJOR} != requested ${REQ_MAJOR} (${ROCM_VERSION}). LXC needs matching host driver."
-  should_upgrade_host=true
-elif dpkg --compare-versions "${HOST_ROCM_VERSION}" lt "${ROCM_VERSION}" 2>/dev/null; then
-  echo "Host ROCm ${HOST_ROCM_VERSION} < requested ${ROCM_VERSION} — upgrade recommended (7.14 is old vs 10.0.0)."
-  should_upgrade_host=true
+	echo "Host ROCm major ${HOST_ROCM_MAJOR} != required ${REQ_MAJOR} (${RESOLVED_ROCM_DOTTED}). vLLM wheels need matching host driver."
+	should_upgrade_host=true
+elif dpkg --compare-versions "${HOST_ROCM_VERSION}" lt "${RESOLVED_ROCM_DOTTED}" 2>/dev/null; then
+	echo "Host ROCm ${HOST_ROCM_VERSION} < required ${RESOLVED_ROCM_DOTTED} — upgrade recommended."
+	should_upgrade_host=true
 fi
 
+# Only prompt if HOST_ROCM_SETUP is not explicitly 0, and we detected need
 if [[ "${should_upgrade_host}" == "true" ]]; then
-  echo ""
-  echo "Host ROCm upgrade required to ${ROCM_VERSION} before LXC will see the GPU."
-  echo "  Current host: ${HOST_ROCM_VERSION} -> target: ${ROCM_VERSION}"
-  echo "  This will:"
-  echo "    - Switch host repo to https://stable.repo.amd.com/rocm/core/packages/${HOST_REPO_DIST} for 10.x"
-  echo "      (or https://repo.amd.com/rocm/packages-multi-arch/${HOST_REPO_DIST} for 7.x)"
-  echo "    - apt update && apt install amdrocm${REQ_MAJOR:+${ROCM_VERSION%.*}} host packages"
-  echo "    - May require reboot if amdgpu DKMS/firmware changes"
-  echo ""
-  printf 'Upgrade host ROCm to %s now? [y/N] ' "${ROCM_VERSION}"
-  read -r _ans
-  case "${_ans}" in
-    y|Y|yes|YES)
-      echo "[0/6] Upgrading host ROCm ${HOST_ROCM_VERSION} -> ${ROCM_VERSION} ..."
-      mkdir -p /etc/apt/keyrings
-      if [[ "${REQ_MAJOR}" -ge 10 ]] 2>/dev/null; then
-        echo "  Using stable.repo.amd.com for ROCm 10.x (host ${HOST_REPO_DIST} <- ${HOST_CODENAME})"
-        wget -qO - https://stable.repo.amd.com/rocm/gpg/packages.gpg | gpg --dearmor | tee /etc/apt/keyrings/amdrocm.gpg > /dev/null
-        tee /etc/apt/sources.list.d/rocm.list << EOF
+	echo ""
+	echo "Host ROCm appears outdated for ${RESOLVED_VARIANT} (${RESOLVED_ROCM_DOTTED})."
+	echo "  Current host: ${HOST_ROCM_VERSION} -> required: ${RESOLVED_ROCM_DOTTED} (${RESOLVED_VARIANT})"
+	echo "  Wheels bundle userspace, but host provides amdgpu kernel driver/firmware behind /dev/kfd."
+	echo "  This will (if you answer y):"
+	if [[ "${REQ_MAJOR}" -ge 10 ]] 2>/dev/null; then
+		echo "    - Switch host repo to https://stable.repo.amd.com/rocm/core/packages/${HOST_REPO_DIST} for 10.x"
+	else
+		echo "    - Use https://repo.amd.com/rocm/packages-multi-arch/${HOST_REPO_DIST} (7.x)"
+	fi
+	echo "    - apt update && apt install amdrocm* host packages (${RESOLVED_ROCM_DOTTED})"
+	echo "    - May require reboot if amdgpu DKMS/firmware changes"
+	echo ""
+	if [[ "${HOST_ROCM_SETUP:-}" == "0" ]]; then
+		echo "HOST_ROCM_SETUP=0 — skipping host upgrade prompt (per env)."
+	else
+		printf 'Upgrade host ROCm to %s now? [y/N] ' "${RESOLVED_ROCM_DOTTED}"
+		read -r _ans
+		case "${_ans}" in
+			y|Y|yes|YES)
+				echo "[0/6] Upgrading host ROCm ${HOST_ROCM_VERSION} -> ${RESOLVED_ROCM_DOTTED} ..."
+				mkdir -p /etc/apt/keyrings
+				if [[ "${REQ_MAJOR}" -ge 10 ]] 2>/dev/null; then
+					echo "  Using stable.repo.amd.com for ROCm 10.x (host ${HOST_REPO_DIST} <- ${HOST_CODENAME})"
+					wget -qO - https://stable.repo.amd.com/rocm/gpg/packages.gpg | gpg --dearmor | tee /etc/apt/keyrings/amdrocm.gpg > /dev/null
+					tee /etc/apt/sources.list.d/rocm.list << EOF
 deb [arch=amd64 signed-by=/etc/apt/keyrings/amdrocm.gpg] https://stable.repo.amd.com/rocm/core/packages/${HOST_REPO_DIST} stable main
 EOF
-        tee /etc/apt/preferences.d/rocm-pin << 'PIN'
+					tee /etc/apt/preferences.d/rocm-pin << 'PIN'
 Package: *
 Pin: origin stable.repo.amd.com
 Pin-Priority: 1001
 PIN
-      else
-        echo "  Using repo.amd.com/packages-multi-arch for ROCm 7.x (host ${HOST_REPO_DIST} <- ${HOST_CODENAME})"
-        wget -qO - https://repo.amd.com/rocm/packages-multi-arch/gpg/rocm.gpg | gpg --dearmor | tee /etc/apt/keyrings/amdrocm.gpg > /dev/null
-        tee /etc/apt/sources.list.d/rocm.list << EOF
+				else
+					echo "  Using repo.amd.com/packages-multi-arch for ROCm 7.x (host ${HOST_REPO_DIST} <- ${HOST_CODENAME})"
+					wget -qO - https://repo.amd.com/rocm/packages-multi-arch/gpg/rocm.gpg | gpg --dearmor | tee /etc/apt/keyrings/amdrocm.gpg > /dev/null
+					tee /etc/apt/sources.list.d/rocm.list << EOF
 deb [arch=amd64 signed-by=/etc/apt/keyrings/amdrocm.gpg] https://repo.amd.com/rocm/packages-multi-arch/${HOST_REPO_DIST} stable main
 EOF
-        tee /etc/apt/preferences.d/rocm-pin << 'PIN'
+					tee /etc/apt/preferences.d/rocm-pin << 'PIN'
 Package: *
 Pin: origin repo.radeon.com
 Pin-Priority: 1001
 PIN
-      fi
-      echo 'APT::Key::GPGCommand "/usr/bin/gpg";' > /etc/apt/apt.conf.d/99gpg-override || true
-      # Bullseye security is expired on this trixie host (old leftover) — ignore Valid-Until to unblock apt
-      if ! apt-get update -o Acquire::Check-Valid-Until=false 2>&1 | tee /tmp/rocm-apt-update.log; then
-        echo "WARNING: apt update had errors (see /tmp/rocm-apt-update.log) — continuing if stable repo was fetched"
-        cat /tmp/rocm-apt-update.log 2>&1 | tail -40 || true
-      fi
-      # If stable repo still 404, diagnostic
-      if grep -q "404  Not Found" /tmp/rocm-apt-update.log 2>&1 || grep -q "does not have a Release file" /tmp/rocm-apt-update.log 2>&1; then
-        echo "ERROR: Host repo https://stable.repo.amd.com/rocm/core/packages/${HOST_REPO_DIST} has no Release file (check https://stable.repo.amd.com/rocm/core/packages/ for valid dists: debian12 debian13 ubuntu2204 ubuntu2404 etc)" >&2
-        echo "Contents of $(cat /etc/apt/sources.list.d/rocm.list 2>&1)" >&2
-      fi
-      ROCM_MM_HOST="$(echo "${ROCM_VERSION}" | cut -d. -f1,2)"
-      echo "  Installing host packages for ROCm ${ROCM_VERSION} (try amdrocm${ROCM_MM_HOST}-gfx1150, fallback amdrocm${ROCM_MM_HOST}) ..."
-      if ! apt-get install -y --no-install-recommends "amdrocm${ROCM_MM_HOST}-gfx1150" "amdrocm-core${ROCM_MM_HOST}-gfx1150" 2>&1; then
-        echo "  Per-GPU host package not found, trying generic amdrocm${ROCM_MM_HOST} ..."
-        apt-get install -y --no-install-recommends "amdrocm${ROCM_MM_HOST}" "amdrocm-core${ROCM_MM_HOST}" || {
-          echo "  Trying generic amdrocm metapackage ..."
-          apt-get install -y --no-install-recommends amdrocm || true
-        }
-      fi
-      # Also ensure amdgpu dkms if needed
-      if ! dkms status 2>&1 | grep -q amdgpu; then
-        echo "  amdgpu dkms not found — installing amdgpu-dkms if available ..."
-        apt-get install -y --no-install-recommends amdgpu-dkms 2>&1 || true
-      fi
-      echo "  Host ROCm upgrade done. New host version: $(get_host_rocm_version)"
-      echo "  Host rocm-smi:"
-      rocm-smi 2>&1 | head -40 || true
-      # Check if reboot needed (amdgpu/kfd changed)
-      if dmesg 2>&1 | tail -5 | grep -qi "amdgpu.*firmware"; then
-        echo "  NOTE: amdgpu firmware may have changed — reboot recommended if LXC still shows 'no gpu node'."
-      fi
-      echo ""
-      ;;
-    *)
-      echo "Skipping host ROCm upgrade — LXC will be built with ${ROCM_VERSION} but may fail with 'no ROCm device' if host stays on ${HOST_ROCM_VERSION}."
-      echo "You can re-run with ROCM_VERSION=${HOST_ROCM_VERSION} ./deploy-hlh-ai-engine-vllm.sh to match host, or re-run and answer 'y' to upgrade host."
-      echo ""
-      ;;
-  esac
+				fi
+				echo 'APT::Key::GPGCommand "/usr/bin/gpg";' > /etc/apt/apt.conf.d/99gpg-override || true
+				if ! apt-get update -o Acquire::Check-Valid-Until=false 2>&1 | tee /tmp/rocm-apt-update.log; then
+					echo "WARNING: apt update had errors (see /tmp/rocm-apt-update.log) — continuing if stable repo was fetched"
+					cat /tmp/rocm-apt-update.log 2>&1 | tail -40 || true
+				fi
+				if grep -q "404  Not Found" /tmp/rocm-apt-update.log 2>&1 || grep -q "does not have a Release file" /tmp/rocm-apt-update.log 2>&1; then
+					echo "ERROR: Host repo has no Release file (check https://stable.repo.amd.com/rocm/core/packages/ for valid dists)" >&2
+					echo "Contents of $(cat /etc/apt/sources.list.d/rocm.list 2>&1)" >&2
+				fi
+				ROCM_MM_HOST="$(echo "${RESOLVED_ROCM_DOTTED}" | cut -d. -f1,2)"
+				echo "  Installing host packages for ROCm ${RESOLVED_ROCM_DOTTED} (try amdrocm${ROCM_MM_HOST}-gfx1150, fallback amdrocm${ROCM_MM_HOST}) ..."
+				if ! apt-get install -y --no-install-recommends "amdrocm${ROCM_MM_HOST}-gfx1150" "amdrocm-core${ROCM_MM_HOST}-gfx1150" 2>&1; then
+					echo "  Per-GPU host package not found, trying generic amdrocm${ROCM_MM_HOST} ..."
+					apt-get install -y --no-install-recommends "amdrocm${ROCM_MM_HOST}" "amdrocm-core${ROCM_MM_HOST}" || {
+						echo "  Trying generic amdrocm metapackage ..."
+						apt-get install -y --no-install-recommends amdrocm || true
+					}
+				fi
+				if ! dkms status 2>&1 | grep -q amdgpu; then
+					echo "  amdgpu dkms not found — installing amdgpu-dkms if available ..."
+					apt-get install -y --no-install-recommends amdgpu-dkms 2>&1 || true
+				fi
+				echo "  Host ROCm upgrade done. New host version: $(get_host_rocm_version)"
+				echo "  Host rocm-smi:"
+				rocm-smi 2>&1 | head -40 || true
+				if dmesg 2>&1 | tail -5 | grep -qi "amdgpu.*firmware"; then
+					echo "  NOTE: amdgpu firmware may have changed — reboot recommended if LXC still shows 'no gpu node'."
+				fi
+				echo ""
+				;;
+			*)
+				echo "Skipping host ROCm upgrade — LXC will be built with ${RESOLVED_ROCM_DOTTED} wheels (userspace bundled), but host driver stays on ${HOST_ROCM_VERSION}."
+				echo "You can re-run with VLLM_ROCM_VARIANT=${RESOLVED_VARIANT} or ROCM_VERSION=${HOST_ROCM_VERSION} to match host, or set HOST_ROCM_SETUP=1 and answer 'y'."
+				echo ""
+				;;
+		esac
+	fi
+else
+	if [[ "${HOST_ROCM_VERSION}" != "unknown" ]]; then
+		echo "Host ROCm ${HOST_ROCM_VERSION} matches required ${RESOLVED_ROCM_DOTTED} (or kernel driver sufficient) — no upgrade needed."
+		echo ""
+	fi
 fi
 
 confirm_existing_lxc_delete() {
@@ -288,7 +400,6 @@ LXC_EXISTS=false
 UPDATE_IN_PLACE=false
 if pct status "${LXC_ID}" >/dev/null 2>&1; then
 	LXC_EXISTS=true
-	# capture return code: 0=destroy, 2=update
 	set +e
 	confirm_existing_lxc_delete
 	_confirm_rc=$?
@@ -314,22 +425,24 @@ if [[ "${UPDATE_IN_PLACE}" == "true" ]]; then
 		pct start "${LXC_ID}"
 		sleep 5
 	fi
-	echo "[5/6] Running in-container bootstrap (update mode — patch vLLM in place)..."
+	echo "[5/6] Running in-container bootstrap (update mode — patch vLLM + WebUI in place)..."
+	echo "  Forwarding VLLM_VERSION=${RESOLVED_VLLM_VERSION} VLLM_ROCM_VARIANT=${RESOLVED_VARIANT} -> LXC"
 	pct exec "${LXC_ID}" -- mkdir -p /root/ai-engine-bootstrap
 	pct push "${LXC_ID}" "$BOOTSTRAP_SCRIPT" /root/ai-engine-bootstrap/configure-hlh-ai-engine-vllm.sh --perms 0755
-	pct exec "${LXC_ID}" -- env ROCM_VERSION="${ROCM_VERSION}" VLLM_DEFAULT_MODEL="${VLLM_DEFAULT_MODEL}" bash /root/ai-engine-bootstrap/configure-hlh-ai-engine-vllm.sh
+	pct exec "${LXC_ID}" -- env VLLM_VERSION="${RESOLVED_VLLM_VERSION}" VLLM_ROCM_VARIANT="${RESOLVED_VARIANT}" VLLM_DEFAULT_MODEL="${VLLM_DEFAULT_MODEL}" bash /root/ai-engine-bootstrap/configure-hlh-ai-engine-vllm.sh
 	echo "[6/6] Update complete. LXC ${LXC_ID} (${LXC_NAME}) patched in place (no recreate)."
 	echo "Model storage: ${MODEL_HOST_DIR} (host) <-> ${MODEL_LXC_DIR} (container) on ${POOL}"
-	echo "Backend      : ${VLLM_BACKEND} (gfx1150, ROCm HIP native in-container)"
-	echo "vLLM API (OpenAI-compatible) : http://192.168.1.13:8000 ( /health /v1/models /v1/chat/completions )"
-	echo "Open WebUI                   : NOT configured (phase 10)"
-	echo "Runtime config inside LXC    : /etc/vllm.env"
+	echo "Backend      : ${VLLM_BACKEND} (gfx1150, ROCm HIP native via wheels)"
+	echo "vLLM API     : http://192.168.1.13:8000 ( /health /v1/models /v1/chat/completions ) — agentic coding"
+	echo "Open WebUI   : http://192.168.1.13:${WEBUI_PORT}/ (chat UI, no port mapping)"
+	echo "Runtime config: /etc/vllm.env + /etc/open-webui.env inside LXC"
 	echo "Health: curl -s http://192.168.1.13:8000/health && curl -s http://192.168.1.13:8000/v1/models | head -100"
-	echo "Logs:   ssh root@192.168.1.13 'journalctl -u vllm -f'"
+	echo "WebUI:  curl -s http://192.168.1.13:${WEBUI_PORT}/ | head -20"
+	echo "Logs:   ssh root@192.168.1.13 'journalctl -u vllm -f; journalctl -u open-webui -f'"
 	exit 0
 fi
 
-echo "[2/6] Creating privileged Ubuntu LXC (${LXC_ID}, ${LXC_NAME}) on ${POOL} — ROCm ${ROCM_VERSION}, ${VLLM_BACKEND}..."
+echo "[2/6] Creating privileged Ubuntu LXC (${LXC_ID}, ${LXC_NAME}) on ${POOL} — ${VLLM_BACKEND}..."
 pct create "${LXC_ID}" "${LXC_IMAGE}" \
 	--storage "${POOL}" \
 	--rootfs "${LXC_ROOTFS_SIZE}" \
@@ -341,28 +454,18 @@ pct create "${LXC_ID}" "${LXC_IMAGE}" \
 	--unprivileged 0 \
 	--onboot 1 \
 	--mp0 "${MODEL_HOST_DIR},mp=${MODEL_LXC_DIR}" \
-	--description "vLLM AI engine (native, no docker) serving ${VLLM_DEFAULT_MODEL} (qwen3.5-9b), host ROCm ${ROCM_VERSION}, model storage on ${POOL}"
+	--description "vLLM ${RESOLVED_VLLM_VERSION} ${RESOLVED_VARIANT} + Open WebUI :${WEBUI_PORT} native (no docker), serving ${VLLM_DEFAULT_MODEL} (qwen3.5-9b), host ROCm ${RESOLVED_ROCM_DOTTED}, model storage on ${POOL}"
 
 echo "[3/6] Adding GPU/ROCm passthrough devices..."
-# Only the 890M iGPU (gfx1150): card0 (226:1) + renderD128 (226:128) + kfd (511:0)
-# RX 480 eGPU (gfx803) nodes are intentionally excluded so ROCm cannot
-# enumerate the unsupported device as GPU 0 and fail the entire init chain.
-# KFD is shared (511:0) but ROCm only sees GPUs that have a visible renderD.
 cat >> "/etc/pve/lxc/${LXC_ID}.conf" <<'LXCCONF'
 
 # GPU passthrough - 890M iGPU only (gfx1150/Strix Halo, 0000:c9:00.0)
 # card0 (226:0) + renderD128 (226:128) is the 890M (1002:150e); card1/2 + renderD129/130 are Tesla K80s (10de:102d) via OCuLink — intentionally NOT passed.
-# Earlier configs used card1/renderD129 when K80 was not enumerated as card0; on current host (trixie, 7.0.14-11-pve) 890M is card0.
 lxc.cgroup2.devices.allow: c 226:0 rwm
 lxc.cgroup2.devices.allow: c 226:128 rwm
 # kfd major is 511 on ROCm 7.x, 234 on ROCm 10.x (both seen on trixie) — allow both for forward compat
 lxc.cgroup2.devices.allow: c 511:0 rwm
 lxc.cgroup2.devices.allow: c 234:0 rwm
-# Mount only the 890M nodes; /dev/dri is created automatically by LXC.
-# NOTE: Do NOT use 'lxc.mount.entry: none dev/dri ...' — on Proxmox 9.x that
-# incorrectly mounts the host root (rpool/ROOT/pve-1) onto /dev/dri inside the
-# container (seen as rpool/ROOT/pve-1 /dev/dri zfs in /proc/mounts), breaking
-# DRM and causing rocminfo 'Invalid argument' and rocm-smi 'No GPUs'.
 lxc.mount.entry: /dev/dri/card0 dev/dri/card0 none bind,optional,create=file
 lxc.mount.entry: /dev/dri/renderD128 dev/dri/renderD128 none bind,optional,create=file
 lxc.mount.entry: /dev/kfd dev/kfd none bind,optional,create=file
@@ -372,8 +475,6 @@ echo "[4/6] Starting LXC ${LXC_ID}..."
 pct start "${LXC_ID}"
 sleep 5
 
-# Prompt to set root password (replaces manual pct enter + passwd)
-# Only on fresh create; skip on --update in-place and non-interactive without --password
 if [[ "${UPDATE_IN_PLACE:-false}" != "true" ]] && [[ -t 0 ]] && [[ -z "${NONINTERACTIVE_MODE:-}" ]]; then
 	echo ""
 	echo "Root password for LXC ${LXC_ID} is not set by pct create."
@@ -400,21 +501,22 @@ if [[ "${UPDATE_IN_PLACE:-false}" != "true" ]] && [[ -t 0 ]] && [[ -z "${NONINTE
 	esac
 	unset _pw_ask
 elif [[ -n "${LXC_PASSWORD:-}" ]]; then
-	# Non-interactive: allow LXC_PASSWORD env for automation
 	echo "Setting root password via LXC_PASSWORD env..."
 	printf "root:%s\n" "${LXC_PASSWORD}" | pct exec "${LXC_ID}" -- chpasswd && echo "Root password set via env."
 fi
 
-echo "[5/6] Running in-container bootstrap (native vLLM install)..."
+echo "[5/6] Running in-container bootstrap (native vLLM + WebUI)..."
+echo "  Forwarding VLLM_VERSION=${RESOLVED_VLLM_VERSION} VLLM_ROCM_VARIANT=${RESOLVED_VARIANT} -> LXC"
 pct exec "${LXC_ID}" -- mkdir -p /root/ai-engine-bootstrap
 pct push "${LXC_ID}" "$BOOTSTRAP_SCRIPT" /root/ai-engine-bootstrap/configure-hlh-ai-engine-vllm.sh --perms 0755
-pct exec "${LXC_ID}" -- env ROCM_VERSION="${ROCM_VERSION}" VLLM_DEFAULT_MODEL="${VLLM_DEFAULT_MODEL}" bash /root/ai-engine-bootstrap/configure-hlh-ai-engine-vllm.sh
+pct exec "${LXC_ID}" -- env VLLM_VERSION="${RESOLVED_VLLM_VERSION}" VLLM_ROCM_VARIANT="${RESOLVED_VARIANT}" VLLM_DEFAULT_MODEL="${VLLM_DEFAULT_MODEL}" bash /root/ai-engine-bootstrap/configure-hlh-ai-engine-vllm.sh
 
 echo "[6/6] Deployment complete. LXC ${LXC_ID} (${LXC_NAME}) is running."
 echo "Model storage: ${MODEL_HOST_DIR} (host) <-> ${MODEL_LXC_DIR} (container) on ${POOL}"
-echo "Backend      : ${VLLM_BACKEND} (gfx1150, ROCm HIP native in-container)"
-echo "vLLM API (OpenAI-compatible) : http://192.168.1.13:8000 ( /health /v1/models /v1/chat/completions )"
-echo "Open WebUI                   : NOT configured (phase 10)"
-echo "Runtime config inside LXC    : /etc/vllm.env (model path, served name, gpu-mem-util, max-model-len, HSA override)"
+echo "Backend      : ${VLLM_BACKEND} (gfx1150, ROCm HIP native via wheels, no docker — tok/s optimized)"
+echo "vLLM API     : http://192.168.1.13:8000 ( /health /v1/models /v1/chat/completions ) — agentic coding"
+echo "Open WebUI   : http://192.168.1.13:${WEBUI_PORT}/ (chat UI, native, port 80 no mapping)"
+echo "Runtime config: /etc/vllm.env (vLLM) + /etc/open-webui.env (WebUI) inside LXC"
 echo "Health: curl -s http://192.168.1.13:8000/health && curl -s http://192.168.1.13:8000/v1/models | head -100"
-echo "Logs:   ssh root@192.168.1.13 'journalctl -u vllm -f'"
+echo "WebUI:  curl -s http://192.168.1.13:${WEBUI_PORT}/ | head -20"
+echo "Logs:   ssh root@192.168.1.13 'journalctl -u vllm -f'  |  ssh root@192.168.1.13 'journalctl -u open-webui -f'"

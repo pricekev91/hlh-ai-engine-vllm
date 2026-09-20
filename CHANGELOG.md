@@ -5,6 +5,21 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-09-20
+
+### Changed
+
+- **Simplicity-first native stack: `uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/0.29.0/rocm723`** — configure now auto-resolves **latest stable vLLM + matching ROCm variant** at deploy time from `wheels.vllm.ai` (today `0.29.0/rocm723` → ROCm 7.2.3, Python 3.12/cp312). Zero script changes when `0.30.0` ships. Same resolver in `deploy` and `configure` so CT build and LXC bootstrap always agree.
+- **Open WebUI included natively (no docker)** — same LXC, two venvs (`/opt/vllm-venv` + `/opt/open-webui-venv`), single `open-webui.service` on **port 80** (no port mapping). `tok/s` first: native HIP avoids docker veth/IPC overhead on the 890M APU's UMA/GTT path. WebUI talks to vLLM at `127.0.0.1:8000/v1` with `BYPASS_MODEL_ACCESS_CONTROL=true`, data at `/opt/open-webui/data`.
+- **Host ROCm stays in sync** — deploy translates variant `rocm723` → `7.2.3` and prompts to upgrade host if major mismatches or `/dev/kfd` missing. Wheels bundle userspace; host only needs amdgpu kernel driver/firmware. `ROCM_VERSION` legacy env still honored (derived to `VLLM_ROCM_VARIANT`), but `VLLM_VERSION`/`VLLM_ROCM_VARIANT` are now canonical. `HOST_ROCM_SETUP=0` skips prompt.
+- **Removed:** all Docker, ROCm apt in LXC, `ROCM_VERSION=10.0.0` hard-pin, `AMD_SMI_PATH` PYTHONPATH hack, `TORCH_SPEC`/`VLLM_WHEEL` hard-pins, `stable.repo.amd.com/whl-next` + `rocm.frameworks.amd.com` URLs, `VLLM_USE_V2_MODEL_RUNNER` / `HSA_OVERRIDE_GFX_VERSION` mandatory flags (now commented last-resort).
+
+### Added
+
+- `open-webui.service` (native, port 80) + `/etc/open-webui.env` + `/usr/local/bin/open-webui-run.sh` — enable with `systemctl enable --now open-webui`, logs `journalctl -u open-webui -f`.
+- Resolver helpers `resolve_vllm_version()` / `resolve_rocm_variant()` / `variant_to_dotted()` / `resolve_python_version()` in both scripts — single source of truth via PyPI JSON + `wheels.vllm.ai` HTML probe.
+- `vllm` install now via `uv pip install vllm --extra-index-url $WHEELS` (pip local-version wins `+rocm723` over PyPI CUDA), optional `flash-attn`/`amd-aiter` warn-and-continue with `FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE` fallback.
+
 ## [0.3.3] - 2026-09-18
 
 ### Fixed
