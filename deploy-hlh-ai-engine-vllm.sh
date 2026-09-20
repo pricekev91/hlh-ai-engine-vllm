@@ -250,7 +250,6 @@ echo ""
 
 should_upgrade_host=false
 if [[ "${HOST_ROCM_VERSION}" == "unknown" ]]; then
-	# No amdrocm packages — check if kernel driver is sufficient (wheels bundle userspace)
 	if [[ -e /dev/kfd ]]; then
 		echo "Host has no amdrocm apt packages but /dev/kfd exists — kernel driver is likely sufficient (wheels bundle userspace)."
 		echo "  rocm-smi orphan check: $(rocm-smi --version 2>&1 | head -1 || echo 'no rocm-smi')"
@@ -260,10 +259,14 @@ if [[ "${HOST_ROCM_VERSION}" == "unknown" ]]; then
 		should_upgrade_host=true
 	fi
 elif [[ "${HOST_ROCM_MAJOR}" != "${REQ_MAJOR}" ]]; then
-	echo "Host ROCm major ${HOST_ROCM_MAJOR} != required ${REQ_MAJOR} (${RESOLVED_ROCM_DOTTED}). vLLM wheels need matching host driver."
-	should_upgrade_host=true
+	echo "NOTE: Host ROCm ${HOST_ROCM_VERSION} != required ${RESOLVED_ROCM_DOTTED} — wheels bundle userspace, kernel driver likely still OK."
+	echo "  Host stays on ${HOST_ROCM_VERSION}, LXC will use ${RESOLVED_ROCM_DOTTED} wheels (no downgrade). Use HOST_ROCM_SETUP=1 to force host install of ${RESOLVED_ROCM_DOTTED}."
 elif dpkg --compare-versions "${HOST_ROCM_VERSION}" lt "${RESOLVED_ROCM_DOTTED}" 2>/dev/null; then
-	echo "Host ROCm ${HOST_ROCM_VERSION} < required ${RESOLVED_ROCM_DOTTED} — upgrade recommended."
+	echo "NOTE: Host ROCm ${HOST_ROCM_VERSION} < required ${RESOLVED_ROCM_DOTTED} — wheels bundle userspace, skipping auto-upgrade (use HOST_ROCM_SETUP=1 to force)."
+fi
+# Allow explicit force via HOST_ROCM_SETUP=1 even when we normally skip
+if [[ "${HOST_ROCM_SETUP:-}" == "1" && "${HOST_ROCM_VERSION}" != "${RESOLVED_ROCM_DOTTED}" ]]; then
+	echo "HOST_ROCM_SETUP=1 — forcing host upgrade check."
 	should_upgrade_host=true
 fi
 
@@ -423,8 +426,13 @@ if [[ "${UPDATE_IN_PLACE}" == "true" ]]; then
 	if ! pct status "${LXC_ID}" 2>&1 | grep -q "running"; then
 		echo "  LXC not running — starting..."
 		pct start "${LXC_ID}"
-		sleep 5
+		sleep 12
 	fi
+	# Give fresh network a moment (systemd-networkd/DHCP); configure also waits, but avoid immediate pct exec fail
+	for i in $(seq 1 6); do
+		if pct exec "${LXC_ID}" -- getent hosts pypi.org >/dev/null 2>&1; then break; fi
+		sleep 3
+	done
 	echo "[5/6] Running in-container bootstrap (update mode — patch vLLM + WebUI in place)..."
 	echo "  Forwarding VLLM_VERSION=${RESOLVED_VLLM_VERSION} VLLM_ROCM_VARIANT=${RESOLVED_VARIANT} -> LXC"
 	pct exec "${LXC_ID}" -- mkdir -p /root/ai-engine-bootstrap
@@ -473,7 +481,13 @@ LXCCONF
 
 echo "[4/6] Starting LXC ${LXC_ID}..."
 pct start "${LXC_ID}"
-sleep 5
+sleep 12
+# Wait for LXC network before bootstrap (fresh container DHCP)
+for i in $(seq 1 6); do
+	if pct exec "${LXC_ID}" -- getent hosts pypi.org >/dev/null 2>&1; then break; fi
+	echo "  Waiting for LXC network... ($i/6)"
+	sleep 3
+done
 
 if [[ "${UPDATE_IN_PLACE:-false}" != "true" ]] && [[ -t 0 ]] && [[ -z "${NONINTERACTIVE_MODE:-}" ]]; then
 	echo ""

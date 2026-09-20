@@ -44,47 +44,65 @@ WHEELS_BASE="https://wheels.vllm.ai/rocm"
 PYPI_JSON="https://pypi.org/pypi/vllm/json"
 
 # --- helpers: resolve latest stable + variant + python ---
+# All helpers are network-resilient: retry with backoff and trust pinned values
+# when deploy already resolved them (fresh LXC network may need ~10s after pct start).
+curl_retry() {
+  local url="$1" tries=6 delay=3
+  for i in $(seq 1 $tries); do
+    if curl -fsSL --connect-timeout 10 --max-time 20 -o /dev/null "$url" 2>/dev/null; then
+      return 0
+    fi
+    sleep $delay
+  done
+  return 1
+}
+curl_fetch() {
+  local url="$1" tries=6 delay=3
+  for i in $(seq 1 $tries); do
+    if curl -fsSL --connect-timeout 10 --max-time 20 "$url" 2>/dev/null; then
+      return 0
+    fi
+    sleep $delay
+  done
+  return 1
+}
+
 resolve_vllm_version() {
   local ver="$1"
   if [[ -n "$ver" ]]; then
     ver="$(echo "$ver" | tr -d '[:space:]')"
-    if curl -fsSL -o /dev/null "${WHEELS_BASE}/${ver}/" 2>/dev/null; then
+    if curl_retry "${WHEELS_BASE}/${ver}/"; then
       echo "$ver"; return 0
     fi
-    echo "FATAL: pinned VLLM_VERSION=${ver} has no wheels at ${WHEELS_BASE}/${ver}/" >&2
-    exit 1
+    echo "WARNING: pinned VLLM_VERSION=${ver} probe failed for ${WHEELS_BASE}/${ver}/ — trusting pinned value (deploy already resolved, LXC network may be warming up)" >&2
+    echo "$ver"; return 0
   fi
-  # Auto: PyPI info.version
   local latest=""
-  latest="$(curl -fsSL "${PYPI_JSON}" 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin)['info']['version'])" 2>/dev/null || true)"
+  latest="$(curl_fetch "${PYPI_JSON}" | python3 -c "import sys,json;print(json.load(sys.stdin)['info']['version'])" 2>/dev/null || true)"
   if [[ -z "$latest" ]]; then
-    echo "FATAL: could not fetch latest vLLM version from ${PYPI_JSON}" >&2
+    echo "FATAL: could not fetch latest vLLM version from ${PYPI_JSON} (network down?)" >&2
     exit 1
   fi
-  if curl -fsSL -o /dev/null "${WHEELS_BASE}/${latest}/" 2>/dev/null; then
+  if curl_retry "${WHEELS_BASE}/${latest}/"; then
     echo "$latest"; return 0
   fi
-  # Fallback: walk releases newest->oldest (skip rc/dev/post)
   echo "PyPI latest ${latest} has no wheels, walking releases..." >&2
   local fallback
-  fallback="$(curl -fsSL "${PYPI_JSON}" 2>/dev/null | python3 -c "
-import json, urllib.request, re, sys
-data=json.load(sys.stdin)
+  fallback="$(curl_fetch "${PYPI_JSON}" | python3 -c "
+import json, re
+data=json.load(__import__('sys').stdin)
 vers=list(data['releases'].keys())
-# sort by packaging-like version tuple (simple numeric)
 def key(v):
-    # strip rc/dev/post
     m=re.match(r'^([0-9.]+)', v)
     if not m: return (-1,)
     return tuple(int(x) for x in m.group(1).split('.'))
-# newest first
 for v in sorted(vers, key=key, reverse=True):
     if re.search(r'rc|dev|post|a|b', v): continue
     print(v)
 " 2>/dev/null | head -20)"
   while IFS= read -r v; do
     [[ -z "$v" ]] && continue
-    if curl -fsSL -o /dev/null "${WHEELS_BASE}/${v}/" 2>/dev/null; then
+    if curl_retry "${WHEELS_BASE}/${v}/"; then
       echo "$v"; return 0
     fi
   done <<< "$fallback"
@@ -97,28 +115,27 @@ resolve_rocm_variant() {
   if [[ -n "$pin" ]]; then
     pin="$(echo "$pin" | sed -E 's/^rocm//; s/[^0-9]//g')"
     local p="rocm${pin}"
-    if curl -fsSL -o /dev/null "${WHEELS_BASE}/${ver}/${p}/" 2>/dev/null; then
+    if curl_retry "${WHEELS_BASE}/${ver}/${p}/"; then
       echo "$p"; return 0
     fi
-    echo "FATAL: pinned VLLM_ROCM_VARIANT=${p} not found at ${WHEELS_BASE}/${ver}/${p}/" >&2
-    exit 1
+    echo "WARNING: pinned VLLM_ROCM_VARIANT=${p} probe failed for ${WHEELS_BASE}/${ver}/${p}/ — trusting pinned value" >&2
+    echo "$p"; return 0
   fi
   local listing
-  listing="$(curl -fsSL "${WHEELS_BASE}/${ver}/" 2>/dev/null || true)"
+  listing="$(curl_fetch "${WHEELS_BASE}/${ver}/" || true)"
   local variants
   variants="$(echo "$listing" | grep -oE 'rocm[0-9]+/' | tr -d '/' | sort -u)"
   if [[ -z "$variants" ]]; then
     echo "FATAL: no rocm variant found at ${WHEELS_BASE}/${ver}/" >&2
     exit 1
   fi
-  # pick highest numeric
   echo "$variants" | sed -E 's/rocm//' | sort -n | tail -1 | awk '{print "rocm"$1}'
 }
 
 resolve_python_version() {
   local ver="$1" variant="$2"
   local listing
-  listing="$(curl -fsSL "${WHEELS_BASE}/${ver}/${variant}/vllm/" 2>/dev/null || true)"
+  listing="$(curl_fetch "${WHEELS_BASE}/${ver}/${variant}/vllm/" || true)"
   local whl
   whl="$(echo "$listing" | grep -oE 'vllm-[^"]+\.whl' | grep -vE 'rc|\.dev|dev[0-9]' | head -1 || true)"
   if [[ -z "$whl" ]]; then
@@ -131,8 +148,6 @@ resolve_python_version() {
   local cp
   cp="$(echo "$whl" | grep -oE 'cp[0-9]+' | head -1 || true)"
   if [[ -n "$cp" ]]; then
-    echo "${cp/cp/}" | sed -E 's/([0-9])([0-9])/\1.\2/; s/^3\.([0-9]+)/3.\1/'
-    # cp312 -> 3.12, cp311 -> 3.11
     local num="${cp#cp}"
     echo "${num:0:1}.${num:1}"
     return 0
@@ -162,7 +177,23 @@ ls -l /dev/kfd /dev/dri/ 2>&1 | head -10 || true
 systemctl stop vllm 2>/dev/null || true
 systemctl stop open-webui 2>/dev/null || true
 
-# Resolve versions (single source of truth — deploy does same)
+# --- 1. BASE PACKAGES (do first so curl + network are ready before resolve) ---
+echo "[1/8] Installing base packages..."
+export DEBIAN_FRONTEND=noninteractive
+# Wait for network briefly before apt (fresh LXC may need a few seconds after pct start)
+for i in $(seq 1 12); do
+  if getent hosts pypi.org >/dev/null 2>&1 || getent hosts wheels.vllm.ai >/dev/null 2>&1 || ping -c1 -W2 1.1.1.1 >/dev/null 2>&1; then
+    break
+  fi
+  echo "  Waiting for network... ($i/12)"
+  sleep 3
+done
+apt-get update
+apt-get install -y --no-install-recommends curl ca-certificates git openssh-server \
+  libgomp1 libnuma1 libatomic1 libdrm2 python3-dev build-essential
+
+# Resolve versions AFTER network + curl are ready (single source of truth — deploy does same, but we trust pinned)
+echo "[1/8] Resolving vLLM + ROCm variant (pinned: VLLM_VERSION=${VLLM_VERSION:-auto} VLLM_ROCM_VARIANT=${VLLM_ROCM_VARIANT:-auto})..."
 RESOLVED_VLLM_VERSION="$(resolve_vllm_version "${VLLM_VERSION}")"
 RESOLVED_VARIANT="$(resolve_rocm_variant "${RESOLVED_VLLM_VERSION}" "${VLLM_ROCM_VARIANT}")"
 RESOLVED_PYTHON="$(resolve_python_version "${RESOLVED_VLLM_VERSION}" "${RESOLVED_VARIANT}")"
@@ -183,13 +214,6 @@ echo "  Resolved Python        : ${PYTHON_VERSION}"
 echo "  Wheels index           : ${WHEELS_BASE}/${RESOLVED_VLLM_VERSION}/${RESOLVED_VARIANT}/"
 
 VLLM_INDEX="${WHEELS_BASE}/${RESOLVED_VLLM_VERSION}/${RESOLVED_VARIANT}/"
-
-# --- 1. BASE PACKAGES ---
-echo "[1/8] Installing base packages..."
-export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y --no-install-recommends curl ca-certificates git openssh-server \
-  libgomp1 libnuma1 libatomic1 libdrm2 python3-dev build-essential
 
 if [[ "${ENABLE_ROOT_PASSWORD_SSH}" == "1" ]]; then
   mkdir -p /etc/ssh/sshd_config.d
