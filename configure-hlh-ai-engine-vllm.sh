@@ -218,12 +218,11 @@ echo "  Wheels index           : ${WHEELS_BASE}/${RESOLVED_VLLM_VERSION}/${RESOL
 VLLM_INDEX="${WHEELS_BASE}/${RESOLVED_VLLM_VERSION}/${RESOLVED_VARIANT}/"
 
 # ROCm runtime libs (needed by torch wheels — they link to host libs like MIOpen/rocBLAS)
-# This is additive, warn-only; torch import gate below will fail loud if still missing.
 _ROCM_DOTTED="$(variant_to_dotted "${RESOLVED_VARIANT}")"
 _ROCM_MAJOR="$(echo "${_ROCM_DOTTED}" | cut -d. -f1)"
 echo "[1/8] Installing ROCm runtime libs for ${_ROCM_DOTTED} (if needed)..."
-if [[ ! -f /etc/apt/sources.list.d/rocm.list ]]; then
-  mkdir -p /etc/apt/keyrings
+# Always (re)write repo — previous runs may have wrong suite (ubuntu vs noble) and cause 404
+mkdir -p /etc/apt/keyrings
   if [[ "${_ROCM_MAJOR}" -ge 10 ]] 2>/dev/null; then
     echo "  Adding ROCm apt repo for ${_ROCM_DOTTED} (stable.repo.amd.com) ..."
     wget -qO - https://stable.repo.amd.com/rocm/gpg/packages.gpg | gpg --dearmor | tee /etc/apt/keyrings/amdrocm.gpg > /dev/null 2>&1 || true
@@ -240,26 +239,42 @@ if [[ ! -f /etc/apt/sources.list.d/rocm.list ]]; then
   fi
   echo 'APT::Key::GPGCommand "/usr/bin/gpg";' > /etc/apt/apt.conf.d/99gpg-override 2>&1 || true
   apt-get update -o Acquire::Check-Valid-Until=false 2>&1 | tail -20 || true
-fi
-echo "  Installing ROCm libs for ${_ROCM_DOTTED} (warn-only, covers libroctx/MIOpen/rocBLAS missing)..."
-# Full 'rocm' meta pulls all (MIOpen, rocBLAS, hipBLAS, rccl, roctracer etc) ~2-3GB but guarantees ldd.
-# Try rocm first, then minimal set that maps directly to the 15 missing .so's from torch ldd.
-if ! apt-get install -y --no-install-recommends rocm 2>&1 | tail -40; then
-  echo "  'rocm' meta failed, trying minimal ROCm libs..."
-  if ! apt-get install -y --no-install-recommends rocm-core rocm-hip-runtime rocblas hipblas miopen-hip rccl 2>&1 | tail -40; then
-    echo "  minimal meta failed, trying individual libs..."
+echo "  Installing ROCm libs for ${_ROCM_DOTTED} (covers libroctx/MIOpen/rocBLAS missing)..."
+# Fix: don't pipe to tail directly (masks exit code). Use tee + PIPESTATUS.
+set +e
+apt-get install -y --no-install-recommends rocm 2>&1 | tee /tmp/rocm-install.log; _rc=${PIPESTATUS[0]}
+if [[ $_rc -ne 0 ]]; then
+  echo "  'rocm' meta failed (rc=$_rc), trying minimal ROCm libs..."
+  cat /tmp/rocm-install.log | tail -20 || true
+  apt-get install -y --no-install-recommends rocm-core rocm-hip-runtime rocblas hipblas miopen-hip rccl 2>&1 | tee /tmp/rocm-min.log; _rc2=${PIPESTATUS[0]}
+  if [[ $_rc2 -ne 0 ]]; then
+    echo "  minimal meta failed (rc=$_rc2), trying individual libs..."
+    cat /tmp/rocm-min.log | tail -20 || true
     apt-get install -y --no-install-recommends \
       hip-runtime-amd rocblas hipblas hipblaslt hipfft hiprand hipsolver hipsparse hipsparselt \
-      rccl miopen-hip roctracer rocprofiler-sdk rocsolver 2>&1 | tail -40 || true
+      rccl miopen-hip roctracer rocprofiler-sdk rocsolver 2>&1 | tee /tmp/rocm-indiv.log; _rc3=${PIPESTATUS[0]}
+    if [[ $_rc3 -ne 0 ]]; then
+      echo "  WARNING: individual ROCm libs install failed (rc=$_rc3) — will still try torch import gate"
+      cat /tmp/rocm-indiv.log | tail -30 || true
+      echo "  --- apt policy debug ---"
+      apt-cache policy rocm hip-runtime-amd 2>&1 | head -40 || true
+      cat /etc/apt/sources.list.d/rocm.list 2>&1 || true
+    fi
   fi
 fi
-# ROCm installs to /opt/rocm* — ensure ld.so sees it
-if [[ -d /opt/rocm ]]; then echo "/opt/rocm/lib" > /etc/ld.so.conf.d/rocm.conf 2>&1 || true; fi
-for d in /opt/rocm*/lib /opt/rocm*/lib64; do [[ -d "$d" ]] && echo "$d" >> /etc/ld.so.conf.d/rocm.conf 2>&1 || true; done
+set -e
+# ROCm installs to /opt/rocm* — ensure ld.so sees it (noble needs /opt/rocm-7.2.0/lib)
+if [[ -d /opt/rocm ]]; then echo "/opt/rocm/lib" > /etc/ld.so.conf.d/rocm.conf; fi
+for d in /opt/rocm*/lib /opt/rocm*/lib64; do [[ -d "$d" ]] && echo "$d" >> /etc/ld.so.conf.d/rocm.conf; done
+# Also dedupe and ensure /opt/rocm-*/lib is first
+sort -u /etc/ld.so.conf.d/rocm.conf -o /etc/ld.so.conf.d/rocm.conf 2>&1 || true
+cat /etc/ld.so.conf.d/rocm.conf 2>&1 | head -20 || true
 ldconfig 2>&1 || true
-# Debug: show if now found
-echo "  ldd post-ROCm (should be fewer 'not found'):"
-ldd /opt/vllm-venv/lib/python*/site-packages/torch/lib/libtorch*.so 2>&1 | grep "not found" | head -20 || echo "  (checking after torch install — will verify later)"
+# Also export for current shell's torch import (vllm-run.sh will also set via ld.so)
+export LD_LIBRARY_PATH="/opt/rocm/lib:/opt/rocm-7.2.0/lib:/opt/rocm/lib64:${LD_LIBRARY_PATH:-}"
+# Debug: show if now found (after ROCm libs, before torch — torch not yet installed here, so check again later at [4/8])
+echo "  ldconfig -p roctx/MIOpen:"
+ldconfig -p 2>&1 | grep -E 'roctx|MIOpen|rocblas' | head -10 || echo "  (no roctx yet — will check after torch install at [4/8])"
 
 if [[ "${ENABLE_ROOT_PASSWORD_SSH}" == "1" ]]; then
   mkdir -p /etc/ssh/sshd_config.d
@@ -299,6 +314,9 @@ uv pip install --python "${PY}" --extra-index-url "${VLLM_INDEX}" "flash-attn" "
 # --- 4. HARD VERIFICATION (no CUDA) ---
 echo "[4/8] Verifying vLLM install..."
 export FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
+# Ensure ROCm libs are on loader path for this check (and for vllm-run.sh later)
+export LD_LIBRARY_PATH="/opt/rocm/lib:/opt/rocm-7.2.0/lib:/opt/rocm/lib64:/opt/rocm-7.2.0/lib64:${LD_LIBRARY_PATH:-}"
+ldconfig 2>&1 || true
 
 PKGS="$("${PY}" -m pip list --format=freeze)"
 if grep -qiE '^(nvidia-|cuda-)' <<<"${PKGS}"; then
@@ -401,7 +419,9 @@ set -a; . ${ENV_FILE}; set +a
 export FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE
 export HF_HUB_CACHE="${MODEL_DIR}/.hf-cache"
 export PATH="${VENV_DIR}/bin:\${PATH}"
-# Wheels bundle ROCm — do NOT set LD_LIBRARY_PATH / ROCM_PATH / HIP_PATH
+export LD_LIBRARY_PATH="/opt/rocm/lib:/opt/rocm-7.2.0/lib:/opt/rocm/lib64:/opt/rocm-7.2.0/lib64:\${LD_LIBRARY_PATH:-}"
+export ROCM_PATH="/opt/rocm"
+export HIP_PATH="/opt/rocm"
 
 ARGS=(
   "\${AI_MODEL_PATH}"
