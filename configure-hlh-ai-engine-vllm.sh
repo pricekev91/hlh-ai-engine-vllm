@@ -241,13 +241,25 @@ if [[ ! -f /etc/apt/sources.list.d/rocm.list ]]; then
   echo 'APT::Key::GPGCommand "/usr/bin/gpg";' > /etc/apt/apt.conf.d/99gpg-override 2>&1 || true
   apt-get update -o Acquire::Check-Valid-Until=false 2>&1 | tail -20 || true
 fi
-echo "  Installing ROCm libs for ${_ROCM_DOTTED} (warn-only)..."
-# Attempt rocm-core meta, fallback to individual libs that ldd reported missing
-if ! apt-get install -y --no-install-recommends rocm-core rocm-hip-runtime rocblas hipblas miopen-hip rccl 2>&1 | tail -40; then
-  echo "  rocm-core meta failed, trying individual ROCm libs..."
-  apt-get install -y --no-install-recommends hip-runtime-amd rocblas hipblas hipblaslt hipfft hiprand hipsolver hipsparse hipsparselt rccl miopen-hip roctracer rocm-smi-lib 2>&1 | tail -40 || true
+echo "  Installing ROCm libs for ${_ROCM_DOTTED} (warn-only, covers libroctx/MIOpen/rocBLAS missing)..."
+# Full 'rocm' meta pulls all (MIOpen, rocBLAS, hipBLAS, rccl, roctracer etc) ~2-3GB but guarantees ldd.
+# Try rocm first, then minimal set that maps directly to the 15 missing .so's from torch ldd.
+if ! apt-get install -y --no-install-recommends rocm 2>&1 | tail -40; then
+  echo "  'rocm' meta failed, trying minimal ROCm libs..."
+  if ! apt-get install -y --no-install-recommends rocm-core rocm-hip-runtime rocblas hipblas miopen-hip rccl 2>&1 | tail -40; then
+    echo "  minimal meta failed, trying individual libs..."
+    apt-get install -y --no-install-recommends \
+      hip-runtime-amd rocblas hipblas hipblaslt hipfft hiprand hipsolver hipsparse hipsparselt \
+      rccl miopen-hip roctracer rocprofiler-sdk rocsolver 2>&1 | tail -40 || true
+  fi
 fi
+# ROCm installs to /opt/rocm* — ensure ld.so sees it
+if [[ -d /opt/rocm ]]; then echo "/opt/rocm/lib" > /etc/ld.so.conf.d/rocm.conf 2>&1 || true; fi
+for d in /opt/rocm*/lib /opt/rocm*/lib64; do [[ -d "$d" ]] && echo "$d" >> /etc/ld.so.conf.d/rocm.conf 2>&1 || true; done
 ldconfig 2>&1 || true
+# Debug: show if now found
+echo "  ldd post-ROCm (should be fewer 'not found'):"
+ldd /opt/vllm-venv/lib/python*/site-packages/torch/lib/libtorch*.so 2>&1 | grep "not found" | head -20 || echo "  (checking after torch install — will verify later)"
 
 if [[ "${ENABLE_ROOT_PASSWORD_SSH}" == "1" ]]; then
   mkdir -p /etc/ssh/sshd_config.d
