@@ -362,6 +362,8 @@ echo "  Running: uv pip install vllm --extra-index-url ${VLLM_INDEX}"
 # The ROCm index is self-contained (torch, triton, amdsmi, etc.) — one extra-index covers the whole stack.
 # We use --extra-index-url so the +rocm local version wins over PyPI CUDA build (pip behavior, uv also honors local version).
 uv pip install --python "${PY}" vllm --extra-index-url "${VLLM_INDEX}"
+# Ensure Prometheus metrics endpoint is available at /metrics (vllm serve exposes it by default via prometheus_client - no --enable-metrics flag)
+uv pip install --python "${PY}" prometheus_client
 
 # Optional but recommended on gfx1150 APU: flash-attn / aiter for attention kernel (speed, not memory)
 # Warn-and-continue if unavailable — Triton fallback via FLASH_ATTENTION_TRITON_AMD_ENABLE.
@@ -442,8 +444,7 @@ AI_MODEL_PATH=${DEFAULT_MODEL_PATH}
 AI_SERVED_NAME=${DEFAULT_MODEL_NAME}
 AI_GPU_MEM_UTIL=${GPU_MEM_UTIL}
 AI_MAX_MODEL_LEN=${MAX_MODEL_LEN}
-# Prometheus metrics (unauthenticated on vmbr0, scrape at http://\${AI_PORT}/metrics)
-AI_ENABLE_METRICS=1
+# Prometheus metrics always exposed at http://${AI_PORT}/metrics (unauth on vmbr0, no flag needed - prometheus_client)
 # Optional: require this bearer token on the API (recommended, host is 0.0.0.0)
 AI_API_KEY=""
 # Extra 'vllm serve' args, space-separated. Example: "--max-num-seqs 8 --skip-mm-profiling"
@@ -498,9 +499,6 @@ ARGS=(
   --limit-mm-per-prompt '{"image":1,"video":1}'
   --mm-processor-cache-gb 1
 )
-if [[ "\${AI_ENABLE_METRICS:-1}" == "1" ]]; then
-  ARGS+=(--enable-metrics)
-fi
 if [[ -n "\${AI_API_KEY:-}" ]]; then
   ARGS+=(--api-key "\${AI_API_KEY}")
 fi
