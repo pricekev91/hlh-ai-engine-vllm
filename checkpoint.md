@@ -167,7 +167,31 @@
   fallback), never the memory accounting. Don't conflate FA presence with
   `AI_GPU_MEM_UTIL` tuning.
 
-## 8. Quick resume commands
+## 8. 0.5.1 — torch import failure (2026-09-20)
+
+- **Symptom:** fresh LXC 113, `deploy --update`-style bootstrap died at [4/8]:
+  `ImportError: libroctx64.so.4: cannot open shared object file` (plus 14 more
+  missing ROCm libs in `ldd torch/lib/*.so`).
+- **Root cause (verified live):** LXC template has **no `gnupg`** →
+  `wget rocm.gpg.key | gpg --dearmor | tee amdrocm.gpg` wrote a **0-byte keyring**
+  (all stages masked by `>/dev/null` + `|| true`) → `apt-get update` failed
+  `GPG error: NO_PUBKEY 9386B48A1A693C5C` (swallowed) → all three
+  `apt-get install rocm…` fallbacks: `Unable to locate package` → warn-and-continue
+  → torch crash. Keyring at `/etc/apt/keyrings/amdrocm.gpg` was 0 bytes on the
+  failed box; `command -v gpg` → nothing.
+- **Fix (0.5.1):** `gnupg` in base packages + hard `gpg` gate; `fetch_rocm_key()`
+  with retry + non-empty + `gpg --show-keys` verification; repo URL probed
+  (dotted 7.2.3 → 7.2 → 10.x dists); `apt-get update` logged + `rocm-core`
+  candidate hard gate; fallback lib list corrected (drop nonexistent
+  `hiprtc-amd`, add `hsa-amd-aqlprofile` + `libdw1`); early `ldconfig -p` gate
+  on 4 core libs; [4/8] missing-libs now FATAL; `ROCM_LIB_DIRS`/`_ROCM_HOME`
+  derived from real `/opt/rocm*` (was hardcoded `/opt/rocm-7.2.0`).
+- **Verified live (ad-hoc first, then full `deploy --update` re-run):** keyring
+  2250 bytes, repo `https://repo.radeon.com/rocm/apt/7.2.3 noble main`, libs in
+  `/opt/rocm-7.2.3`, torch 2.12.0+git6bbd260 hip 7.2.53211, GPU "AMD Radeon 890M",
+  cuda matmul OK, vllm 0.29.0 imports.
+
+## 9. Quick resume commands
 
 ```bash
 # local

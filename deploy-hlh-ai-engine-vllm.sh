@@ -123,7 +123,7 @@ def key(v):
 for v in sorted(vers, key=key, reverse=True):
     if re.search(r'rc|dev|post|a|b', v): continue
     print(v)
-" 2>/dev/null | head -20)"
+" 2>/dev/null | head -20 || true)"
 	while IFS= read -r v; do
 		[[ -z "$v" ]] && continue
 		if curl -fsSL -o /dev/null "${WHEELS_BASE}/${v}/" 2>/dev/null; then
@@ -148,7 +148,7 @@ resolve_rocm_variant() {
 	local listing
 	listing="$(curl -fsSL "${WHEELS_BASE}/${ver}/" 2>/dev/null || true)"
 	local variants
-	variants="$(echo "$listing" | grep -oE 'rocm[0-9]+/' | tr -d '/' | sort -u)"
+	variants="$(echo "$listing" | grep -oE 'rocm[0-9]+/' | tr -d '/' | sort -u || true)"
 	if [[ -z "$variants" ]]; then
 		echo "FATAL: no rocm variant found at ${WHEELS_BASE}/${ver}/" >&2
 		exit 1
@@ -297,6 +297,7 @@ if [[ "${should_upgrade_host}" == "true" ]]; then
 				if [[ "${REQ_MAJOR}" -ge 10 ]] 2>/dev/null; then
 					echo "  Using stable.repo.amd.com for ROCm 10.x (host ${HOST_REPO_DIST} <- ${HOST_CODENAME})"
 					wget -qO - https://stable.repo.amd.com/rocm/gpg/packages.gpg | gpg --dearmor | tee /etc/apt/keyrings/amdrocm.gpg > /dev/null
+					[[ -s /etc/apt/keyrings/amdrocm.gpg ]] || { echo "ERROR: ROCm GPG keyring empty (gpg missing or network) — apt will reject the repo" >&2; exit 1; }
 					tee /etc/apt/sources.list.d/rocm.list << EOF
 deb [arch=amd64 signed-by=/etc/apt/keyrings/amdrocm.gpg] https://stable.repo.amd.com/rocm/core/packages/${HOST_REPO_DIST} stable main
 EOF
@@ -308,6 +309,7 @@ PIN
 				else
 					echo "  Using repo.amd.com/packages-multi-arch for ROCm 7.x (host ${HOST_REPO_DIST} <- ${HOST_CODENAME})"
 					wget -qO - https://repo.amd.com/rocm/packages-multi-arch/gpg/rocm.gpg | gpg --dearmor | tee /etc/apt/keyrings/amdrocm.gpg > /dev/null
+					[[ -s /etc/apt/keyrings/amdrocm.gpg ]] || { echo "ERROR: ROCm GPG keyring empty (gpg missing or network) — apt will reject the repo" >&2; exit 1; }
 					tee /etc/apt/sources.list.d/rocm.list << EOF
 deb [arch=amd64 signed-by=/etc/apt/keyrings/amdrocm.gpg] https://repo.amd.com/rocm/packages-multi-arch/${HOST_REPO_DIST} stable main
 EOF

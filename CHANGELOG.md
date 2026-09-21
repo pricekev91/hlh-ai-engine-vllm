@@ -5,6 +5,18 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-09-20
+
+### Fixed
+
+- **CRITICAL: torch import failed with `ImportError: libroctx64.so.4` — ROCm libs never installed in LXC** — root cause: the ubuntu-24.04 LXC template ships **without `gnupg`**, so `wget rocm.gpg.key | gpg --dearmor | tee amdrocm.gpg` silently wrote a **0-byte keyring** (every stage masked by `> /dev/null 2>&1` / `|| true`). `apt-get update` then failed `GPG error: NO_PUBKEY 9386B48A1A693C5C` (swallowed by `|| true`), all three `apt-get install rocm…` fallbacks died with `Unable to locate package`, the script warned and continued, and the [4/8] torch gate died on missing `libMIOpen/libamdhip64/libroctx64/…`. Now: `gnupg` added to base packages with a hard `command -v gpg` gate; new `fetch_rocm_key()` retries the fetch, dearmors with `gpg --batch --yes`, and **fails loudly** unless the keyring is non-empty AND parseable (`gpg --show-keys`).
+- **ROCm apt repo selection now probed, not guessed** — 0.5.0 wrote the repo line blind (and its `7.2.3` fallback was a dead `echo A > file || echo B > file` that could never fire). Now probes `https://repo.radeon.com/rocm/apt/<dotted|major.minor>/dists/<codename>/Release` (dotted `7.2.3` first for exact wheel match) and the 10.x `stable.repo.amd.com` dists before writing `rocm.list`; FATAL with probed-URL list if none reachable.
+- **`apt-get update` for ROCm repo no longer swallowed** — logged to `/tmp/apt-update-rocm.log`, and a **candidate check** (`apt-cache policy rocm-core`) is a hard gate before any install attempt.
+- **Individual-libs fallback list corrected** — dropped nonexistent `hiprtc-amd` (libhiprtc ships in `hip-runtime-amd`), added `hsa-amd-aqlprofile` (`libhsa-amd-aqlprofile64.so.1`) and `libdw1` (`libdw.so.1`) — both are torch-wheel deps that only surface after the first 15 libs are present. Individual install failure is now FATAL (was warn-and-continue into a guaranteed torch crash ~7 min later).
+- **Early lib-resolution gate after ROCm install** — `libamdhip64/libroctx64/librocblas/libMIOpen` must resolve via `ldconfig -p` immediately after apt install (fail in ~1 min, not after the full pip install); the [4/8] `ldd torch/lib/*.so` missing-libs check is now FATAL instead of WARNING.
+- **No more hardcoded `/opt/rocm-7.2.0`** — `ROCM_LIB_DIRS` / `_ROCM_HOME` derived from the `/opt/rocm*` dirs that actually exist (7.2.3 installs to `/opt/rocm-7.2.3`); `/etc/ld.so.conf.d/rocm.conf` + `LD_LIBRARY_PATH` in the verify step and `vllm-run.sh` use the derived paths.
+- **Deploy (host path)** — same silent-failure class: host ROCm key fetch now verifies the keyring is non-empty before trusting the repo (FATAL otherwise).
+
 ## [0.5.0] - 2026-09-20
 
 ### Changed
