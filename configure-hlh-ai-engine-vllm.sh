@@ -27,8 +27,8 @@ WEBUI_VENV_DIR="${WEBUI_VENV_DIR:-/opt/open-webui-venv}"
 AI_PORT="${AI_PORT:-8000}"
 WEBUI_PORT="${WEBUI_PORT:-80}"
 MODEL_DIR="${MODEL_DIR:-/srv/ai/models}"
-DEFAULT_MODEL_PATH="${DEFAULT_MODEL_PATH:-${MODEL_DIR}/Qwen3.5-9B}"
-DEFAULT_MODEL_NAME="${DEFAULT_MODEL_NAME:-qwen3.5-9b}"
+DEFAULT_MODEL_PATH="${DEFAULT_MODEL_PATH:-${MODEL_DIR}/Qwen3.6-35B-A3B-GPTQ-Int4}"
+DEFAULT_MODEL_NAME="${DEFAULT_MODEL_NAME:-qwen3.6-35b-a3b-gptq-int4}"
 GPU_MEM_UTIL="${AI_GPU_MEM_UTIL:-0.60}"
 MAX_MODEL_LEN="${AI_MAX_MODEL_LEN:-16384}"
 ENABLE_ROOT_PASSWORD_SSH="${ENABLE_ROOT_PASSWORD_SSH:-1}"
@@ -442,6 +442,8 @@ AI_MODEL_PATH=${DEFAULT_MODEL_PATH}
 AI_SERVED_NAME=${DEFAULT_MODEL_NAME}
 AI_GPU_MEM_UTIL=${GPU_MEM_UTIL}
 AI_MAX_MODEL_LEN=${MAX_MODEL_LEN}
+# Prometheus metrics (unauthenticated on vmbr0, scrape at http://\${AI_PORT}/metrics)
+AI_ENABLE_METRICS=1
 # Optional: require this bearer token on the API (recommended, host is 0.0.0.0)
 AI_API_KEY=""
 # Extra 'vllm serve' args, space-separated. Example: "--max-num-seqs 8 --skip-mm-profiling"
@@ -496,6 +498,9 @@ ARGS=(
   --limit-mm-per-prompt '{"image":1,"video":1}'
   --mm-processor-cache-gb 1
 )
+if [[ "\${AI_ENABLE_METRICS:-1}" == "1" ]]; then
+  ARGS+=(--enable-metrics)
+fi
 if [[ -n "\${AI_API_KEY:-}" ]]; then
   ARGS+=(--api-key "\${AI_API_KEY}")
 fi
