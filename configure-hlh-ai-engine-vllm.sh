@@ -555,7 +555,7 @@ cat > "${WEBUI_SERVICE}" <<UNIT
 Description=Open WebUI (native, chat UI for vLLM)
 After=network-online.target vllm.service
 Wants=network-online.target
-Requires=vllm.service
+Wants=vllm.service
 
 [Service]
 Type=simple
