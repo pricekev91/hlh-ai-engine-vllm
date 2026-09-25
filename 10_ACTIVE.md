@@ -1,13 +1,20 @@
 # Active
 
+## 0.6.3 — Greenfield/Nuke codified: deploy auto-handles shared VRAM + persistenced hold (2026-09-25)
+- [x] Codify adhoc `pct exec 111 -- systemctl stop ai-engine` (VRAM 20286 MiB) into `deploy-hlh-ai-engine-vllm.sh:1.0.1` — auto-detects 111 holding >4GB and stops `ai-engine` before bootstrap (unattended `git pull && ./deploy-hlh-ai-engine-vllm.sh --destroy` now works); `KEEP_111=1` preserves 111 for co-tenancy (`AI_GPU_MEM_UTIL` 0.45 or `SKIP_VRAM_PREFLIGHT=1`)
+- [x] `configure-hlh-ai-engine-vllm.sh:0.6.3` — fix `nvidia-persistenced` removal while held (unhold all 5 before `apt-get remove`, re-hold afterwards) + health wait 5 min → 8 min (90×5s) for 21GB weights + `TRITON_ATTN` JIT + 250s `init engine`
+- [x] `hlh-ai-engine-egpu` `1.0.2` — harden 580 branch to full 5-package `madison` pin (was only 2), unhold all 5 + persistenced cleanup; `CHANGELOG 2.3.2`
+- [ ] **prox01: `cd ~/git/hlh-ai-engine-egpu && git pull && cd ~/git/hlh-ai-engine-vllm && git pull && ./deploy-hlh-ai-engine-vllm.sh --destroy`** (greenfield nuke — auto-stops 111, no manual VRAM step)
+- [ ] Verify `curl -s http://192.168.1.13:8000/health` + `/v1/models` + chat completion (35B-A3B GPTQ-Int4) + `nvidia-smi` 27GB + `TRITON_ATTN` in journal
+
 ## 0.6.2 — Triton JIT needs a C compiler + Python headers: vLLM crash-loop on fresh LXC (2026-09-25)
 - [x] Diagnose 3rd live run: EngineCore died in `profile_run` (dummy MM pass → ViT rotary Triton kernel) with `RuntimeError: Failed to find C compiler` — sm_70 forces TRITON_ATTN + Triton kernels; Triton JIT-compiles a C driver extension on first launch; LXC base install had no `cc`
 - [x] Configure: `gcc g++ python3-dev` in base packages + hard gates on `cc` and `Python.h` + [4/8] Triton JIT smoke (pre-warms `/root/.triton`)
 - [x] 4th live run (LXC 113 rebuilt): configure died at [4/8] — the smoke kernel was embedded in a stdin heredoc, but triton @jit requires inspectable source ("@jit functions should be defined in a Python file") → verify now runs from `/tmp/vllm-verify.py`
 - [x] Fixed smoke run on live LXC exposed layer 2: `gcc` present but `Python.h: No such file or directory` → added `python3-dev`
 - [x] README: fix attention-backend note (TRITON_ATTN on sm_70) + troubleshooting entry
-- [ ] **prox01: `pct exec 111 -- systemctl stop ai-engine`** (llama.cpp holds ~20 GB of the shared V100) → `cd ~/git/hlh-ai-engine-vllm && git pull && ./deploy-hlh-ai-engine-vllm.sh --update`
-- [ ] Verify `curl -s http://192.168.1.13:8000/health` + `/v1/models` + a real chat completion via WebUI
+- [x] **prox01: `pct exec 111 -- systemctl stop ai-engine`** (llama.cpp holds ~20 GB) → `cd ~/git/hlh-ai-engine-vllm && git pull && ./deploy-hlh-ai-engine-vllm.sh --update` — **verified 04:52 UTC: health 200, models `qwen3.6-35b-a3b-gptq-int4`, chat 32 tokens OK, `nvidia-smi` 27.1GB, `TRITON_ATTN` backend, 250s init** (ad-hoc, now codified in 0.6.3)
+- [x] Verify `curl -s http://192.168.1.13:8000/health` + `/v1/models` + a real chat completion via WebUI — done
 
 ## 0.6.1 — 580-branch apt rotation: userspace/kernel NVML mismatch (2026-09-24)
 - [x] Diagnose 2nd live run failure: transitional CUDA repo index (NVIDIA rotated 580.65.06 → 580.178.04 mid-run) + the script's unpinned fallback installed mismatched 580.178.04 userspace → `Driver/library version mismatch`

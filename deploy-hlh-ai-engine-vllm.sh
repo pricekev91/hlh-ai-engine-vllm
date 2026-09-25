@@ -45,6 +45,9 @@ Env overrides (forwarded into LXC bootstrap):
   VLLM_VERSION=x.y.z   Pin vLLM (default 0.19.1 = last stable with cu128/sm_70).
                        WARNING: 0.20.0+ pulls torch 2.11+cu13 which dropped Volta.
   NVIDIA_DRIVER_VERSION  Host driver to expect (default 580.65.06, R580 last for Volta)
+  KEEP_111=1           Keep LXC 111 (hlh-ai-engine-egpu) running on shared V100.
+                       Default: deploy stops 111's ai-engine if it holds >4GB VRAM
+                       (greenfield: vLLM needs ~27GB free at 0.85 util).
 
 Examples:
   ./deploy-hlh-ai-engine-vllm.sh                    # full deploy
@@ -109,7 +112,7 @@ if [[ "${VLLM_VERSION}" != "0.19.1" ]]; then
 	echo "  will not run those builds. Only override with a known sm_70 build." >&2
 fi
 
-echo "=== hlh-ai-engine-vllm deploy v0.6.0 ==="
+echo "=== hlh-ai-engine-vllm deploy v0.6.3 ==="
 echo "  LXC          : ${LXC_ID} (${LXC_NAME}) ${LXC_IP_CONFIG} on ${POOL}"
 echo "  vLLM         : ${VLLM_VERSION} (PyPI CUDA build — last stable with cu128/sm_70)"
 echo "  torch        : 2.10.0+cu128 (pulled by vLLM; bundles CUDA 12.8 runtime)"
@@ -185,6 +188,28 @@ if [[ "$SKIP_HOST_DRIVER" == "false" ]]; then
 	ls -l /dev/nvidia* 2>&1 | head -8 || true
 else
 	echo "[0/6] Skipping host driver check (--skip-host-driver)"
+fi
+
+# --- Co-tenancy: V100 is shared with LXC 111 (llama.cpp) — VRAM is shared ---
+# Greenfield/nuke would FATAL in the LXC bootstrap (VRAM preflight) if 111 holds
+# ~20GB. This host-side block stops 111's ai-engine automatically so the bootstrap
+# can allocate ~27GB (0.85*32GB). Set KEEP_111=1 to preserve 111 (then lower
+# AI_GPU_MEM_UTIL or use SKIP_VRAM_PREFLIGHT=1 for co-tenancy).
+if [[ "${KEEP_111:-0}" != "1" ]] && command -v pct >/dev/null 2>&1 && pct status 111 >/dev/null 2>&1; then
+	if pct status 111 2>&1 | grep -qi "running"; then
+		if pct exec 111 -- systemctl is-active ai-engine >/dev/null 2>&1; then
+			MEM_USED_HOST="$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -1 || echo 0)"
+			# Threshold >4GB indicates 111 is actually holding VRAM (idle = 0-100 MiB)
+			if [[ "${MEM_USED_HOST}" =~ ^[0-9]+$ ]] && [[ "${MEM_USED_HOST}" -gt 4096 ]]; then
+				echo "[1/6] Co-tenancy: LXC 111 ai-engine holds ${MEM_USED_HOST} MiB VRAM on shared V100 — stopping for vLLM deploy..."
+				echo "  (override: KEEP_111=1 to keep 111 running, then lower AI_GPU_MEM_UTIL or use SKIP_VRAM_PREFLIGHT=1)"
+				pct exec 111 -- systemctl stop ai-engine 2>&1 || true
+				sleep 3
+				MEM_AFTER="$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -1 || echo "?")"
+				echo "  LXC 111 ai-engine stopped. Host VRAM now ${MEM_AFTER} MiB used."
+			fi
+		fi
+	fi
 fi
 
 echo "[1/6] Creating model storage directory on ${POOL}..."

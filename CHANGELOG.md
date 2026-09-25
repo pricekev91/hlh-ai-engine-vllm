@@ -5,6 +5,13 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.3] - 2026-09-25
+
+### Fixed
+- **Greenfield/Nuke now unattended: deploy auto-stops LXC 111 (llama.cpp) that holds VRAM on the shared V100.** The host `nvidia-smi` check found `20286 MiB` held by `ai-engine` (`MTP 128K Q4`); `configure`'s VRAM preflight (`12482 < 27852 MiB`) then `FATAL`ed and left `113` with only driver userspace and no `vllm.service`. `deploy-hlh-ai-engine-vllm.sh` now detects `pct status 111` + `systemctl is-active ai-engine` + `nvidia-smi --query-gpu=memory.used >4096` and `systemctl stop ai-engine` automatically (set `KEEP_111=1` to preserve 111, then lower `AI_GPU_MEM_UTIL` or `SKIP_VRAM_PREFLIGHT=1` for co-tenancy). `10_ACTIVE.md` pending manual stop is now codified.
+- **Configure `nvidia-persistenced` removal no longer leaves `615.71.09` held behind.** `apt-mark hold` on the 5-package set blocked `apt-get remove nvidia-persistenced` (`libnvidia-compute-580 : Depends: nvidia-persistenced` while held). Now unholds the full set before removal and re-holds afterwards; `systemctl disable --now` covers the branch-locked daemon that is not needed in the LXC.
+- **Bootstrap health wait 5 min → 8 min (90×5s).** Live `113` took `250.85s` `init engine (profile, create kv cache, warmup)` + `21.41s` weights + JIT compile for `TRITON_ATTN`/`FLA` kernels; the old 60×5s window always warned `NOT healthy yet` even on a successful first boot.
+
 ## [0.6.2] - 2026-09-25
 
 ### Fixed

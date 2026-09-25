@@ -88,8 +88,9 @@ Default model: `/srv/ai/models/Qwen3.6-35B-A3B-GPTQ-Int4` (served as `qwen3.6-35
 The same OCuLink V100 (`c5:00.0`) is passed through to **both** LXCs. Both engines can run simultaneously, but they share the **32 GB HBM2**:
 
 - The egpu engine (llama.cpp) at its default config (27B Q4 + 128K KV) uses ~33 GB — effectively the whole card.
-- If you want vLLM on the V100, **stop LXC 111's server** (`pct exec 111 -- systemctl stop llama-server`) or right-size it (shorter context, smaller model) and lower vLLM's `AI_GPU_MEM_UTIL` (e.g. `0.45`).
+- If you want vLLM on the V100, **stop LXC 111's server** (`pct exec 111 -- systemctl stop ai-engine`) or right-size it (shorter context, smaller model) and lower vLLM's `AI_GPU_MEM_UTIL` (e.g. `0.45`).
 - `nvidia-smi` (host or LXC) shows the combined VRAM usage of both.
+- **Deploy codified (v0.6.3):** `deploy-hlh-ai-engine-vllm.sh` now auto-detects `111` holding >4GB VRAM and `systemctl stop ai-engine` before bootstrapping `113`, so a fresh `git pull && ./deploy-hlh-ai-engine-vllm.sh --destroy` is unattended. Set `KEEP_111=1` to preserve 111 (then use `SKIP_VRAM_PREFLIGHT=1` or lower `AI_GPU_MEM_UTIL` for co-tenancy).
 
 ## V100 performance notes (Volta sm_70)
 

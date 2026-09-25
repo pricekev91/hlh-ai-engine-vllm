@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # configure-hlh-ai-engine-vllm.sh
-# Version: 0.6.2
+# Version: 0.6.3
 # Description: Native vLLM + native Open WebUI on Ubuntu 24.04 LXC (CUDA 12.8)
 #              Target: NVIDIA Tesla V100 GV100GL 32GB (Volta, cc 7.0) via OCuLink eGPU.
 #              No Docker — tok/s first, shared /srv/ai/models.
@@ -169,11 +169,14 @@ apt-mark hold \
 	"libnvidia-compute-${DRIVER_BRANCH}" "nvidia-utils-${DRIVER_BRANCH}" \
 	"libnvidia-cfg1-${DRIVER_BRANCH}" "libnvidia-decode-${DRIVER_BRANCH}" \
 	"libnvidia-gpucomp-${DRIVER_BRANCH}" 2>&1 | head -n 8 || true
-# nvidia-persistenced (pulled in by some earlier runs) is branch-locked and not
-# needed here: disable + remove if present.
+# nvidia-persistenced is pulled as a dep of 580 userspace (615.71.09 from Ubuntu)
+# but is not needed in the LXC and blocks downgrades while held. Disable, unhold,
+# remove, then re-hold the 5-package set.
 if dpkg -s nvidia-persistenced >/dev/null 2>&1; then
 	systemctl disable --now nvidia-persistenced 2>/dev/null || true
-	apt-get remove -y nvidia-persistenced 2>&1 | tail -n 3 || true
+	apt-mark unhold "libnvidia-compute-${DRIVER_BRANCH}" "nvidia-utils-${DRIVER_BRANCH}" "libnvidia-cfg1-${DRIVER_BRANCH}" "libnvidia-decode-${DRIVER_BRANCH}" "libnvidia-gpucomp-${DRIVER_BRANCH}" 2>/dev/null || true
+	apt-get remove -y nvidia-persistenced 2>&1 | tail -n 5 || true
+	apt-mark hold "libnvidia-compute-${DRIVER_BRANCH}" "nvidia-utils-${DRIVER_BRANCH}" "libnvidia-cfg1-${DRIVER_BRANCH}" "libnvidia-decode-${DRIVER_BRANCH}" "libnvidia-gpucomp-${DRIVER_BRANCH}" 2>/dev/null || true
 fi
 
 # Hard gates: nvidia-smi sees the V100, libcuda.so.1 resolves
@@ -528,9 +531,9 @@ systemctl daemon-reload
 systemctl enable --now vllm
 systemctl enable --now open-webui
 
-echo "Waiting up to 5 min for vLLM health..."
+echo "Waiting up to 8 min for vLLM health (model load 21GB + TRITON_ATTN JIT + profile_run 250s)..."
 HEALTHY=0
-for _ in $(seq 1 60); do
+for _ in $(seq 1 90); do
 	if curl -fsS -m 3 -o /dev/null "http://127.0.0.1:${AI_PORT}/health" 2>/dev/null; then
 		HEALTHY=1; break
 	fi
@@ -563,7 +566,7 @@ systemctl status open-webui --no-pager 2>&1 | tail -15 || true
 
 cat <<SUMMARY
 
-[Bootstrap complete: vLLM ${VLLM_VERSION} CUDA 12.8 (V100 sm_70) + Open WebUI native, script v0.6.0]
+[Bootstrap complete: vLLM ${VLLM_VERSION} CUDA 12.8 (V100 sm_70) + Open WebUI native, script v0.6.3]
   vLLM API   : http://<container-ip>:${AI_PORT}/v1   (health: /health)
   Open WebUI : http://<container-ip>:${WEBUI_PORT}/  (chat UI, BYPASS_MODEL_ACCESS_CONTROL=true)
   Model      : ${DEFAULT_MODEL_PATH} (served as ${DEFAULT_MODEL_NAME})
