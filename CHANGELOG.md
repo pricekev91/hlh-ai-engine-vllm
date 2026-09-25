@@ -5,6 +5,18 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-09-24
+
+### Fixed
+- **580-branch apt rotation broke the pinned userspace install** (live 2nd run): NVIDIA rotated the 580 point release (580.65.06 → 580.178.04) in the CUDA ubuntu2404 repo; a transitional apt index made the `580.65.06-0ubuntu1` pin unresolvable, and the script's `||` unpinned fallback then silently installed the **mismatched** 580.178.04 userspace → `Failed to initialize NVML: Driver/library version mismatch` (NVML requires userspace == host kernel driver version exactly).
+- Configure now **resolves the exact package version string** for the host driver via `apt-cache madison` (handles revision suffixes: `580.65.06-0ubuntu1` vs `580.178.04-1ubuntu1`) and pins the **full 5-package set** (`libnvidia-compute-580`, `libnvidia-cfg1-580`, `libnvidia-decode-580`, `libnvidia-gpucomp-580`, `nvidia-utils-580`) with `--allow-downgrades` — which also heals an already-mixed LXC. **No unpinned fallback**: pin failure is a loud FATAL with the available versions + guidance (repo rotated → upgrade host driver via `hlh-ai-engine-egpu`; repo mid-rotation → `apt-get update` + re-run).
+- `apt-mark unhold` before re-pinning (idempotent re-runs); removes `nvidia-persistenced` if present (branch-locked, not needed in the LXC).
+- Post-install NVML gate now diagnoses version mismatches explicitly (prints host kernel vs LXC userspace versions + fix command).
+
+### Notes
+- Verified against the live CUDA repo index: `580.65.06-0ubuntu1` is listed and downloadable for all five packages after the rotation settled — the failure was a mid-rotation race compounded by the fallback.
+- `hlh-ai-engine-egpu` (LXC 111) got the same hardening: `unhold` before re-pin + post-install FATAL if `libnvidia-compute-580` != host driver version. LXC 111 is unaffected (its userspace already matches).
+
 ## [0.6.0] - 2026-09-24
 
 ### Changed

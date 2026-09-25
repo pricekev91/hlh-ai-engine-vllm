@@ -51,7 +51,7 @@ So: do **not** upgrade vLLM past 0.19.1 on this GPU, and do **not** move the hos
 | File | Purpose |
 |---|---|
 | `deploy-hlh-ai-engine-vllm.sh` | Host-side: validate R580/V100, create LXC 113, GPU passthrough, run bootstrap, verify. |
-| `configure-hlh-ai-engine-vllm.sh` | Inside LXC: driver userspace (580.65.06, CUDA 12.8), uv venvs, vLLM 0.19.1 (PyPI CUDA) + Open WebUI, systemd units, hard verification. |
+| `configure-hlh-ai-engine-vllm.sh` | Inside LXC: driver userspace (580 branch, exact match to host kernel driver, CUDA 12.8), uv venvs, vLLM 0.19.1 (PyPI CUDA) + Open WebUI, systemd units, hard verification. |
 | `00_BACKLOG.md` | Ideas / later work. |
 | `10_ACTIVE.md` | Current focus. |
 | `90_DONE.md` | Completed work. |
@@ -104,6 +104,7 @@ The same OCuLink V100 (`c5:00.0`) is passed through to **both** LXCs. Both engin
 
 - **`nvidia-smi` shows `Tesla PG500-216` instead of `Tesla V100`** → that **is** the V100. The GV100GL board reports its VBIOS product name, not the marketing name (documented in `hlh-ai-engine-egpu` too). The gate is compute capability 7.0, not the string — don't "fix" it.
 - **`nvidia-smi: command not found` in LXC** → driver userspace missing; re-run configure (installs `libnvidia-compute-580` + `nvidia-utils-580`).
+- **`Failed to initialize NVML: Driver/library version mismatch`** → the LXC userspace version does not exactly match the host kernel driver (NVIDIA rotates 580-branch point releases). Re-run configure — it resolves the host driver's exact version via `apt-cache madison`, unholds, and re-pins the full 5-package set (`libnvidia-compute/cfg1/decode/gpucomp-580`, `nvidia-utils-580`). If the repo no longer carries that driver version, upgrade the host driver to the current 580 tip (`hlh-ai-engine-egpu`) and re-run both.
 - **FATAL "not enough free VRAM on the shared V100"** → LXC 111 (llama.cpp) is holding VRAM on the same card: `pct exec 111 -- systemctl stop ai-engine`, then re-run (or `SKIP_VRAM_PREFLIGHT=1` / lower `AI_GPU_MEM_UTIL` for co-tenancy).
 - **`torch.cuda.is_available() == False`** → `/dev/nvidia0`/`/dev/nvidiactl`/`/dev/nvidia-uvm` not bound; redeploy (passthrough block) and restart LXC.
 - **`no kernel image is available for execution on the device`** → you're running a cu13/sm_75+ build; reinstall `vllm==0.19.1` (cu128).

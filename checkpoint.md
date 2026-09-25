@@ -224,3 +224,68 @@ curl -sL "https://wheels.vllm.ai/rocm/0.29.0/rocm723/vllm/" | grep -oE '>[^<]+\.
 - Live observation 2026-09-24: LXC 111 (llama.cpp) was holding ~20 GB of the shared 32 GB — configure now has a VRAM preflight FATAL with `pct exec 111 -- systemctl stop ai-engine` remediation (`SKIP_VRAM_PREFLIGHT=1` override).
 
 **Remaining work:** pull on prox01 + `./deploy-hlh-ai-engine-vllm.sh` (first V100 run). Watch GPU co-tenancy with LXC 111 (llama.cpp on the same V100, 32 GB VRAM shared).
+
+---
+
+## 11. 0.6.1 — 580-branch apt rotation: userspace/kernel NVML mismatch (2026-09-24)
+
+**Symptom (2nd live run):** LXC 113 got created (run 1 had died pre-creation),
+then configure died at `[1/8]`:
+pinned `apt-get install libnvidia-compute-580=580.65.06-0ubuntu1 …` →
+`unmet dependencies` (cfg1/gpucomp "580.178.04-1ubuntu1 is to be installed"),
+the script's `||` unpinned fallback "recovered" by installing **580.178.04**
+userspace, then: `Failed to initialize NVML: Driver/library version mismatch.
+NVML library version: 580.178` → GPU count 0 → FATAL. LXC 113 is left with
+580.178.04 held packages (and `nvidia-persistenced` 615.71.09 pulled from the
+Ubuntu archive).
+
+**Root cause (verified against the live CUDA repo index, 2026-09-24):**
+1. **NVIDIA rotated the 580 point release** (580.65.06 → 580.178.04) in the
+   CUDA ubuntu2404 repo *during* the run. The LXC's `apt-get update` caught a
+   **transitional index**: compute-580@580.65.06 still listed its old dep set
+   (incl. `libnvidia-cfg1-580 = 580.65.06-0ubuntu1`) while the 580.65.06
+   cfg1/gpucomp entries were already gone → unresolvable pin.
+2. **The `||` unpinned fallback was a design bug**: it silently installed a
+   userspace (580.178.04) that mismatches the host kernel driver (580.65.06).
+   NVML requires userspace == kernel-driver version *exactly* → a mismatched
+   install is strictly worse than a loud failure.
+
+**Repo state after the rotation settled (verified from the Packages index):**
+`580.65.06-0ubuntu1` is listed **and downloadable (HTTP 200)** for
+`libnvidia-compute-580`, `libnvidia-cfg1-580`, `libnvidia-decode-580`,
+`libnvidia-gpucomp-580`, `nvidia-utils-580`; compute@580.65.06's current dep
+set is only `{decode ≥ 580.65.06, gpucomp = 580.65.06-0ubuntu1}`. So the exact
+580.65.06 set is installable today; the failure was a mid-rotation race + the
+fallback.
+
+**Fix (configure-hlh-ai-engine-vllm.sh):**
+- Resolve the exact package version string for the host driver via
+  `apt-cache madison` (revision suffix varies: 580.65.06-**0ubuntu1** vs
+  580.178.04-**1ubuntu1** — hardcoded `-0ubuntu1` would break on newer point
+  releases).
+- Pin the **full 5-package set** to that exact version with
+  `--allow-downgrades --no-install-recommends` (downgrade also heals a
+  previously-mixed LXC like 113; keeps display junk out).
+- `apt-mark unhold` before re-pinning (idempotent re-runs).
+- **No unpinned fallback**: pin failure → FATAL with madison dump + guidance
+  (repo rotated → upgrade host driver via hlh-ai-engine-egpu; repo
+  mid-rotation → `apt-get update` + re-run).
+- Post-install NVML gate diagnoses mismatches explicitly (host vs LXC userspace
+  versions + fix command).
+- Removes `nvidia-persistenced` if present (branch-locked, not needed here).
+
+**Same hazard hardened in `hlh-ai-engine-egpu` (LXC 111):** `apt-mark unhold`
+before re-pin + post-install gate FATALing if `libnvidia-compute-580` version
+!= host driver version. LXC 111 is untouched (its userspace already matches).
+
+**Recovery (user, on prox01):** llama.cpp already stopped (user did it).
+```bash
+cd ~/git/hlh-ai-engine-vllm && git pull
+./deploy-hlh-ai-engine-vllm.sh --skip-host-driver
+# LXC 113 exists -> choose (u) in-place update
+```
+The script unholds the broken 580.178.04 packages, re-pins the full set to
+580.65.06-0ubuntu1, and the NVML gate must show 1× `Tesla PG500-216` before
+proceeding. Keep llama.cpp stopped until vLLM is up (VRAM preflight enforces).
+**Watch:** the torch verification step (cu12.8, cc 7.0, fp16 matmul) is the
+first live proof of the whole V100 path.

@@ -93,7 +93,6 @@ if [[ ! "$HOST_DRV" =~ ^580\. ]]; then
 	exit 1
 fi
 DRIVER_BRANCH="${HOST_DRV%%.*}"
-DRIVER_USERSPACE="${NVIDIA_DRIVER_VERSION}"
 
 # CUDA ubuntu2404 repo (key verified BEFORE list written; repair stale list without key)
 mkdir -p /usr/share/keyrings
@@ -116,22 +115,65 @@ if [ ! -s /usr/share/keyrings/cuda-ubuntu2404.gpg ]; then
 fi
 apt-get update || { echo "ERROR: apt-get update failed after adding CUDA repo" >&2; exit 1; }
 
-echo "  Installing libnvidia-compute-${DRIVER_BRANCH} + nvidia-utils-${DRIVER_BRANCH} ${DRIVER_USERSPACE} (provides libcuda.so.1, libnvidia-ml.so, nvidia-smi)..."
-apt-get install -y --allow-downgrades \
-	"libnvidia-compute-${DRIVER_BRANCH}=${DRIVER_USERSPACE}-0ubuntu1" \
-	"nvidia-utils-${DRIVER_BRANCH}=${DRIVER_USERSPACE}-0ubuntu1" 2>&1 | tail -n 20 || \
-apt-get install -y --allow-downgrades \
-	"libnvidia-compute-${DRIVER_BRANCH}" "nvidia-utils-${DRIVER_BRANCH}" 2>&1 | tail -n 20
-apt-mark hold "libnvidia-compute-${DRIVER_BRANCH}" "nvidia-utils-${DRIVER_BRANCH}" 2>&1 | head -n 5 || true
+# Unhold packages held by a previous (possibly broken) run so we can re-pin.
+apt-mark unhold \
+	"libnvidia-compute-${DRIVER_BRANCH}" "nvidia-utils-${DRIVER_BRANCH}" \
+	"libnvidia-cfg1-${DRIVER_BRANCH}" "libnvidia-decode-${DRIVER_BRANCH}" \
+	"libnvidia-gpucomp-${DRIVER_BRANCH}" 2>/dev/null || true
+
+# NVML requires the userspace to EXACTLY match the host kernel driver version.
+# Resolve the exact package version string in the repo for this driver version
+# (the revision suffix varies: 580.65.06-0ubuntu1 vs 580.178.04-1ubuntu1).
+RESOLVED_US="$(apt-cache madison "libnvidia-compute-${DRIVER_BRANCH}" 2>/dev/null \
+	| awk -F'\\|' -v v="${HOST_DRV}" '{gsub(/[ \t]/,"",$2); if (index($2, v "-") == 1) {print $2; exit}}' || true)"
+if [[ -z "${RESOLVED_US}" ]]; then
+	echo "FATAL: no ${HOST_DRV} userspace in the CUDA ubuntu2404 repo (host kernel driver is ${HOST_DRV})." >&2
+	echo "  Available libnvidia-compute-${DRIVER_BRANCH} versions:" >&2
+	apt-cache madison "libnvidia-compute-${DRIVER_BRANCH}" 2>/dev/null | awk -F'\\|' '{gsub(/ /,"",$2); print "   ", $2}' | head -15 >&2 || true
+	echo "  NVIDIA rotates 580-branch point releases; if the repo moved on, upgrade the" >&2
+	echo "  host driver to the current 580 branch tip (hlh-ai-engine-egpu owns the host" >&2
+	echo "  driver) and re-run. If the repo is mid-rotation, re-run after 'apt-get update'." >&2
+	exit 1
+fi
+echo "  Installing userspace ${RESOLVED_US} (exact match for host kernel driver ${HOST_DRV}; provides libcuda.so.1, libnvidia-ml.so, nvidia-smi)..."
+if ! apt-get install -y --allow-downgrades --no-install-recommends \
+	"libnvidia-compute-${DRIVER_BRANCH}=${RESOLVED_US}" \
+	"libnvidia-cfg1-${DRIVER_BRANCH}=${RESOLVED_US}" \
+	"libnvidia-decode-${DRIVER_BRANCH}=${RESOLVED_US}" \
+	"libnvidia-gpucomp-${DRIVER_BRANCH}=${RESOLVED_US}" \
+	"nvidia-utils-${DRIVER_BRANCH}=${RESOLVED_US}" 2>&1 | tail -n 30; then
+	echo "FATAL: pinned userspace install failed (host driver ${HOST_DRV})." >&2
+	echo "  Do NOT fall back to an unpinned install: NVML needs userspace == kernel driver" >&2
+	echo "  version exactly; a mismatched install leaves the GPU unusable" >&2
+	echo "  (Failed to initialize NVML: Driver/library version mismatch)." >&2
+	exit 1
+fi
+apt-mark hold \
+	"libnvidia-compute-${DRIVER_BRANCH}" "nvidia-utils-${DRIVER_BRANCH}" \
+	"libnvidia-cfg1-${DRIVER_BRANCH}" "libnvidia-decode-${DRIVER_BRANCH}" \
+	"libnvidia-gpucomp-${DRIVER_BRANCH}" 2>&1 | head -n 8 || true
+# nvidia-persistenced (pulled in by some earlier runs) is branch-locked and not
+# needed here: disable + remove if present.
+if dpkg -s nvidia-persistenced >/dev/null 2>&1; then
+	systemctl disable --now nvidia-persistenced 2>/dev/null || true
+	apt-get remove -y nvidia-persistenced 2>&1 | tail -n 3 || true
+fi
 
 # Hard gates: nvidia-smi sees the V100, libcuda.so.1 resolves
 set +o pipefail
 nvidia-smi -L 2>&1 | head -5 || true
 set -o pipefail
+NVML_ERR="$(nvidia-smi 2>&1 | head -3 || true)"
 GPU_COUNT="$(nvidia-smi -L 2>&1 | grep -c 'GPU [0-9]:' || true)"
 if [[ "$GPU_COUNT" -ne 1 ]]; then
-	echo "FATAL: expected exactly 1 V100 GPU inside the LXC, found ${GPU_COUNT}." >&2
-	nvidia-smi -L 2>&1 | head -10 || true
+	echo "FATAL: expected exactly 1 GPU inside the LXC, found ${GPU_COUNT}." >&2
+	printf '  nvidia-smi said:\n    %s\n' "${NVML_ERR}" >&2
+	if printf '%s' "${NVML_ERR}" | grep -qi 'mismatch'; then
+		ACTUAL_US="$(dpkg-query -W -f='${Version}' "libnvidia-compute-${DRIVER_BRANCH}" 2>/dev/null || echo '?')"
+		echo "  Driver/library version MISMATCH: host kernel driver ${HOST_DRV} vs LXC userspace ${ACTUAL_US}." >&2
+		echo "  Fix: apt-mark unhold libnvidia-compute-${DRIVER_BRANCH} nvidia-utils-${DRIVER_BRANCH} && re-run this script" >&2
+		echo "  (this script re-pins the exact host-driver version automatically)." >&2
+	fi
 	exit 1
 fi
 # NOTE: this GV100GL board reports its VBIOS product name "Tesla PG500-216" in
@@ -483,6 +525,6 @@ cat <<SUMMARY
   Model      : ${DEFAULT_MODEL_PATH} (served as ${DEFAULT_MODEL_NAME})
   Config     : ${ENV_FILE}  +  ${WEBUI_ENV_FILE}
   Switch     : ${SWITCH_SCRIPT}
-  GPU        : Tesla V100 32GB HBM2 (Volta sm_70), driver userspace ${DRIVER_BRANCH} ${DRIVER_USERSPACE}
+  GPU        : Tesla V100 32GB HBM2 (Volta sm_70), driver userspace ${DRIVER_BRANCH} (host kernel ${HOST_DRV})
   Logs       : journalctl -u vllm -f  |  journalctl -u open-webui -f  |  nvidia-smi
 SUMMARY
