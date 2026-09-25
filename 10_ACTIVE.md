@@ -1,23 +1,9 @@
-# TODO
+# Active
 
-Active items in progress. These are the current focus areas.
-
-## Phase 1 — get vLLM serving (docker `vllm/vllm-openai-rocm` + `/srv/ai/models/Qwen3.5-9B`)
-
-- [ ] Deploy on LXC 113 (`./configure-hlh-ai-engine-vllm.sh` or full `./deploy-hlh-ai-engine-vllm.sh`)
-- [ ] `curl -s http://192.168.1.13:8000/health` → 200; `/v1/models` shows `qwen3.5-9b`
-- [ ] Chat completion smoke test (`--max_tokens 16`) returns sane text
-- [ ] Memory check under load: host `rocm-smi --showmeminfo vram` + LXC `free -g` with `112` (llama.cpp) running — confirm `VLLM_GPU_MEM_UTIL=0.40` coexists; drop to `0.30` if OOM
-- [ ] Confirm `HSA_OVERRIDE_GFX_VERSION=11.0.0` still required with the image (if `HIP error: invalid device function`, the override is wrong; if a native gfx1150 build exists, test without it)
-- [ ] If the image has no `vllm serve` entrypoint, verify `/usr/local/bin/vllm-docker-run.sh` entrypoint-detection kicked in (it auto-prepends `serve`)
-
-## Phase 10 — Open WebUI (deferred, do NOT configure in phase 1)
-
-- [ ] Re-add `open-webui.service` (docker `ghcr.io/open-webui/open-webui:main`, `--network host`, `OPENAI_API_BASE_URL=http://127.0.0.1:8000/v1`) — see `00_BACKLOG.md`
-
-## Done (phase 1 refactor)
-
-- [x] Refactor repo to `vllm/vllm-openai-rocm` docker image (no in-LXC ROCm/venv/wheel shims)
-- [x] Default model `/srv/ai/models/Qwen3.5-9B` (qwen3.5-9b), runtime config in `/etc/vllm.env`
-- [x] `vllm-switch-model.sh` → env-file based
-- [x] README/CHANGELOG/tracking docs updated; co-tenancy policy documented (never stop 112)
+## 0.6.0 — GPU backend refactor: ROCm 890M → CUDA V100 eGPU (2026-09-24)
+- [x] Research: PyPI `vllm` = CUDA build; vLLM 0.20+ → torch 2.11/cu13 (sm_70 dropped) → pin **0.19.1** (torch 2.10.0+cu128)
+- [x] `deploy-hlh-ai-engine-vllm.sh` rewritten: host R580 580.65.06 + V100 validation (driver owned by `hlh-ai-engine-egpu`), LXC 113 creation, `/dev/nvidia*` + UVM passthrough, `--skip-host-driver`/`--update`/`--destroy`
+- [x] `configure-hlh-ai-engine-vllm.sh` rewritten: 580 userspace from CUDA ubuntu2404 repo (pinned 580.65.06-0ubuntu1), vLLM 0.19.1 via uv, hard verification (torch cu12.8, single V100, fp16 kernel launch on sm_70, no `+rocm`/`nvidia-*-cu13` packages), native Open WebUI, systemd units, switch script; all ROCm machinery removed
+- [x] README (stack-ceiling table, GPU co-tenancy, Volta notes) + CHANGELOG 0.6.0 + checkpoint §10 + tracking files
+- [ ] **prox01: pull + `./deploy-hlh-ai-engine-vllm.sh`** (first V100 run; mind co-tenancy with LXC 111)
+- [ ] Post-deploy: `/health` + chat via WebUI + `nvidia-smi` VRAM numbers + journal attention-backend line

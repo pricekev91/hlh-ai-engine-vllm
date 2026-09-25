@@ -2,6 +2,13 @@
 
 This is what is already implemented and verified in this repository.
 
+## 0.6.0 — GPU backend refactor: AMD 890M ROCm → NVIDIA V100 CUDA (2026-09-24)
+
+- [x] Research: plain PyPI `vllm` = CUDA build; vLLM 0.20+ → torch 2.11/cu13 (sm_70 dropped) → pin **vLLM 0.19.1** (torch 2.10.0+cu128); driver R580 580.65.06 + CUDA 12.8 taken from `hlh-ai-engine-egpu`
+- [x] `deploy-hlh-ai-engine-vllm.sh`: host R580 580.65.06 + V100 validation (driver install owned by `hlh-ai-engine-egpu`), LXC 113 creation, `/dev/nvidia*` + UVM passthrough (cgroup2 `195:* 507:* 508:* 510:* 511:*`), `--skip-host-driver`/`--update`/`--destroy`
+- [x] `configure-hlh-ai-engine-vllm.sh`: 580 userspace from CUDA ubuntu2404 repo (pinned `580.65.06-0ubuntu1`, held), vLLM 0.19.1 via uv, hard verification (torch cu12.8, single V100, fp16 kernel launch on sm_70, fail on `+rocm`/`nvidia-*-cu13`), native Open WebUI, systemd units, switch script; all ROCm machinery removed
+- [x] README (Volta sm_70 stack-ceiling table, GPU co-tenancy with LXC 111, Volta performance notes) + CHANGELOG 0.6.0 + checkpoint §10 + 00_BACKLOG/10_ACTIVE updated
+
 ## LXC Deployment
 
 - Direct Proxmox LXC creation via `deploy-hlh-ai-engine-vllm.sh` — **LXC 113** (`.13` parity with `192.168.1.13`, `Proxmox >=100`)

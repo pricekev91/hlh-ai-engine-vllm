@@ -206,3 +206,19 @@ curl -sL https://pypi.org/pypi/vllm/json | python3 -c "import sys,json;print(jso
 curl -sL "https://wheels.vllm.ai/rocm/0.29.0/" | grep -oE 'rocm[0-9]+/'
 curl -sL "https://wheels.vllm.ai/rocm/0.29.0/rocm723/vllm/" | grep -oE '>[^<]+\.whl' | tr -d '>'
 ```
+
+---
+
+## 10. 0.6.0 — GPU backend: ROCm 890M → CUDA V100 eGPU (2026-09-24)
+
+**Current state:** both scripts + README/CHANGELOG/tracking rewritten for the NVIDIA **Tesla V100 GV100 32GB (Volta sm_70)** via OCuLink `c5:00.0`. LXC 113 / 192.168.1.13 identity preserved; only the GPU backend swapped. Deploy **validates** the host R580 580.65.06 driver (install stays owned by `hlh-ai-engine-egpu`) and wires `/dev/nvidia*` passthrough; configure installs the 580 userspace (CUDA 12.8) + **vLLM 0.19.1 from PyPI** (the CUDA build) + native Open WebUI.
+
+**Verified facts (researched 2026-09-24 against PyPI + GitHub tag v0.19.1):**
+- Plain PyPI `vllm` wheels **are the CUDA builds**. `wheels.vllm.ai` does not host stable CUDA wheels (only `rocm`/`xpu`/`nightly` trees; `https://wheels.vllm.ai/cu128` → 404).
+- **vLLM 0.20.0+ pins torch 2.11.0** (PyPI default = **CUDA 13**), and **CUDA 13.0 dropped Volta sm_70** → no vLLM ≥ 0.20 can run on the V100.
+- **vLLM 0.19.1** → torch 2.10.0 (PyPI default = **cu12.8**, `nvidia-*-cu12==12.8.*`), sm_70 kernels included, `cp38-abi3`, Python ≥3.10,<3.14.
+- Driver line: **R580 580.65.06** (per `hlh-ai-engine-egpu`) is the **last branch for Volta**; R590+ dropped Volta; CUDA 12.8 is the last CUDA with sm_70; CUDA 12.8 min driver is 570.86.15 (so the R550 550.163.01 fallback line can't run cu128 wheels).
+- vLLM 0.19.1 source: `check_if_supports_dtype(bfloat16)` warns + falls back on CC<8.0 (V100 runs fp16); `supports_fp8` requires CC≥89; attention backends are CC-gated via `validate_configuration` → on sm_70 vLLM falls back to TORCH_SDPA. `flashinfer-python==0.6.6` is a hard pip dep but is never selected on Volta.
+- GPTQ-Int4 on Volta: Marlin kernels require SM80+; vLLM falls back to the standard GPTQ kernels (works, somewhat slower).
+
+**Remaining work:** pull on prox01 + `./deploy-hlh-ai-engine-vllm.sh` (first V100 run). Watch GPU co-tenancy with LXC 111 (llama.cpp on the same V100, 32 GB VRAM shared).

@@ -5,6 +5,20 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-09-24
+
+### Changed
+- **GPU backend refactor: AMD 890M (ROCm 7.2) → NVIDIA Tesla V100 GV100 32GB eGPU (CUDA 12.8, OCuLink `c5:00.0`)**, mirroring the `hlh-ai-engine-egpu` stack:
+  - Host: NVIDIA **R580 580.65.06** (last driver branch for Volta) on `proxmox-kernel-6.14.11-9-pve` — deploy now *validates* this (host driver install stays owned by `hlh-ai-engine-egpu`); `--skip-host-driver` for re-runs.
+  - LXC 113 passthrough: `/dev/nvidia0`, `/dev/nvidiactl`, `/dev/nvidia-uvm`, `/dev/nvidia-uvm-tools`, `/dev/nvidia-modeset` + cgroup2 allows `195:* 507:* 508:* 510:* 511:*`.
+  - LXC userspace: `libnvidia-compute-580` + `nvidia-utils-580` (580.65.06-0ubuntu1, CUDA ubuntu2404 repo) — no CUDA toolkit (wheels bundle the CUDA 12.8 runtime).
+  - Removed all ROCm machinery: `wheels.vllm.ai` index, `rocm` apt repo/pin/keyring, `openmpi`, `HIP_VISIBLE_DEVICES`, `FLASH_ATTENTION_TRITON_AMD_ENABLE`, `aiter`/`triton-mlir`/`pyrsmi`.
+- **vLLM pin 0.30.0 → 0.19.1** (PyPI CUDA build): 0.19.1 is the **last stable with torch 2.10.0+cu128 (sm_70 kernels)**; vLLM 0.20.0+ pins torch 2.11.0+cu13 and CUDA 13.0 dropped Volta — it cannot run on the V100. Verification now asserts torch cu12.8, a single Tesla V100, a real fp16 kernel launch on sm_70, and fails on any `+rocm`/`nvidia-*-cu13` package in the venv.
+- Runtime defaults: `AI_GPU_MEM_UTIL=0.85` (dedicated 32 GB HBM2), `AI_MAX_MODEL_LEN=16384`; `--enforce-eager` kept (Volta-safe).
+
+### Added
+- README: Volta sm_70 stack-ceiling table (driver R580 / CUDA 12.8 / torch 2.10 / vLLM 0.19.1), GPU co-tenancy section (V100 shared with LXC 111 llama.cpp — 32 GB VRAM is shared), V100 performance notes (fp16, GPTQ non-Marlin fallback, no FP8/FlashInfer on sm_70).
+
 ## [0.5.1] - 2026-09-20
 
 ### Fixed
