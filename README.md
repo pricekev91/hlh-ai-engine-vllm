@@ -26,6 +26,7 @@ prox01 (Proxmox VE, kernel 6.14.11-9-pve)
     ├── vLLM 0.19.1 (native, /opt/vllm-venv, torch 2.10.0+cu128) — OpenAI API :8000
     ├── Open WebUI (native, /opt/open-webui-venv) — chat UI :80
     ├── /dev/nvidia0 + UVM (V100 GV100 32GB, Volta sm_70, via OCuLink c5:00.0)
+    │                 └─ nvidia-smi reports this board as "Tesla PG500-216" (VBIOS name), not "Tesla V100"
     └── /srv/ai/models → host /srv/ai/models (ZFS RaidZ1-6TB, shared with LXC 111)
 ```
 
@@ -101,7 +102,9 @@ The same OCuLink V100 (`c5:00.0`) is passed through to **both** LXCs. Both engin
 
 ## Troubleshooting
 
+- **`nvidia-smi` shows `Tesla PG500-216` instead of `Tesla V100`** → that **is** the V100. The GV100GL board reports its VBIOS product name, not the marketing name (documented in `hlh-ai-engine-egpu` too). The gate is compute capability 7.0, not the string — don't "fix" it.
 - **`nvidia-smi: command not found` in LXC** → driver userspace missing; re-run configure (installs `libnvidia-compute-580` + `nvidia-utils-580`).
+- **FATAL "not enough free VRAM on the shared V100"** → LXC 111 (llama.cpp) is holding VRAM on the same card: `pct exec 111 -- systemctl stop ai-engine`, then re-run (or `SKIP_VRAM_PREFLIGHT=1` / lower `AI_GPU_MEM_UTIL` for co-tenancy).
 - **`torch.cuda.is_available() == False`** → `/dev/nvidia0`/`/dev/nvidiactl`/`/dev/nvidia-uvm` not bound; redeploy (passthrough block) and restart LXC.
 - **`no kernel image is available for execution on the device`** → you're running a cu13/sm_75+ build; reinstall `vllm==0.19.1` (cu128).
 - **VRAM OOM while LXC 111 is running** → shared card; stop/resize the sibling engine or lower `AI_GPU_MEM_UTIL`.

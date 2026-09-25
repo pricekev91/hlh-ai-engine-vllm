@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **vLLM pin 0.30.0 → 0.19.1** (PyPI CUDA build): 0.19.1 is the **last stable with torch 2.10.0+cu128 (sm_70 kernels)**; vLLM 0.20.0+ pins torch 2.11.0+cu13 and CUDA 13.0 dropped Volta — it cannot run on the V100. Verification now asserts torch cu12.8, a single Tesla V100, a real fp16 kernel launch on sm_70, and fails on any `+rocm`/`nvidia-*-cu13` package in the venv.
 - Runtime defaults: `AI_GPU_MEM_UTIL=0.85` (dedicated 32 GB HBM2), `AI_MAX_MODEL_LEN=16384`; `--enforce-eager` kept (Volta-safe).
 
+### Fixed
+- Deploy/configure no longer FATAL on the board's VBIOS name: this GV100GL reports **"Tesla PG500-216"** in `nvidia-smi -L`, not "Tesla V100". Gates are now exactly-one-GPU (host) + torch compute-capability (7,0) (in LXC); the name is informational.
+- New VRAM preflight in configure: FATAL (with remediation `pct exec 111 -- systemctl stop ai-engine`) when the shared 32 GB has less than `AI_GPU_MEM_UTIL` free; `SKIP_VRAM_PREFLIGHT=1` to override.
+
 ### Added
 - README: Volta sm_70 stack-ceiling table (driver R580 / CUDA 12.8 / torch 2.10 / vLLM 0.19.1), GPU co-tenancy section (V100 shared with LXC 111 llama.cpp — 32 GB VRAM is shared), V100 performance notes (fp16, GPTQ non-Marlin fallback, no FP8/FlashInfer on sm_70).
 

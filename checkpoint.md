@@ -220,5 +220,7 @@ curl -sL "https://wheels.vllm.ai/rocm/0.29.0/rocm723/vllm/" | grep -oE '>[^<]+\.
 - Driver line: **R580 580.65.06** (per `hlh-ai-engine-egpu`) is the **last branch for Volta**; R590+ dropped Volta; CUDA 12.8 is the last CUDA with sm_70; CUDA 12.8 min driver is 570.86.15 (so the R550 550.163.01 fallback line can't run cu128 wheels).
 - vLLM 0.19.1 source: `check_if_supports_dtype(bfloat16)` warns + falls back on CC<8.0 (V100 runs fp16); `supports_fp8` requires CC≥89; attention backends are CC-gated via `validate_configuration` → on sm_70 vLLM falls back to TORCH_SDPA. `flashinfer-python==0.6.6` is a hard pip dep but is never selected on Volta.
 - GPTQ-Int4 on Volta: Marlin kernels require SM80+; vLLM falls back to the standard GPTQ kernels (works, somewhat slower).
+- **The board reports `Tesla PG500-216` in `nvidia-smi -L`, not `Tesla V100`** (GV100GL VBIOS product name, 10de:1df0 rev a1 — matches `hlh-ai-engine-egpu` CHANGELOG "GV100GL PG500-216 32GB cc 7.0"). Gates must not grep for the string "V100"; use GPU count (host) + torch `get_device_capability() == (7,0)` (LXC).
+- Live observation 2026-09-24: LXC 111 (llama.cpp) was holding ~20 GB of the shared 32 GB — configure now has a VRAM preflight FATAL with `pct exec 111 -- systemctl stop ai-engine` remediation (`SKIP_VRAM_PREFLIGHT=1` override).
 
 **Remaining work:** pull on prox01 + `./deploy-hlh-ai-engine-vllm.sh` (first V100 run). Watch GPU co-tenancy with LXC 111 (llama.cpp on the same V100, 32 GB VRAM shared).

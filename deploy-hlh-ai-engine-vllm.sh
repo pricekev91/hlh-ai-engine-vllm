@@ -149,13 +149,26 @@ if [[ "$SKIP_HOST_DRIVER" == "false" ]]; then
 	set +o pipefail
 	nvidia-smi 2>&1 | head -12 || true
 	set -o pipefail
-	V100_LIST="$(nvidia-smi -L 2>/dev/null | grep -i 'V100' || true)"
-	if [[ -z "$V100_LIST" ]]; then
-		echo "FATAL: nvidia-smi shows no Tesla V100. Is the OCuLink eGPU seated (c5:00.0)?" >&2
+	# NOTE: this GV100GL board reports its VBIOS product name "Tesla PG500-216"
+	# in nvidia-smi (NOT "Tesla V100") — see hlh-ai-engine-egpu README/CHANGELOG.
+	# Gate on GPU count; the in-LXC torch capability check (cc 7.0) is authoritative.
+	HOST_GPU_COUNT="$(nvidia-smi -L 2>/dev/null | grep -c 'GPU [0-9]:' || true)"
+	if [[ "${HOST_GPU_COUNT}" -ne 1 ]]; then
+		echo "FATAL: expected exactly 1 NVIDIA GPU on the host, found ${HOST_GPU_COUNT}." >&2
+		echo "  Is the OCuLink eGPU seated (c5:00.0)?" >&2
 		nvidia-smi -L 2>&1 | head -5 || true
 		exit 1
 	fi
-	echo "  V100 present: $(echo "$V100_LIST" | wc -l) GPU(s)"
+	GPU_NAME="$(nvidia-smi -L 2>/dev/null | head -1 | cut -d: -f2- | sed 's/ *(UUID:.*//; s/^ *//; s/ *$//' || true)"
+	echo "  GPU: ${GPU_NAME}"
+	if ! printf '%s\n' "${GPU_NAME}" | grep -qiE 'V100|PG500|GV100'; then
+		echo "WARNING: GPU name '${GPU_NAME}' is not the expected GV100 board name (V100/PG500)." >&2
+		echo "  The in-LXC torch check (compute capability 7.0) is the authoritative gate." >&2
+	fi
+	if command -v lspci >/dev/null 2>&1; then
+		NV_PCI="$(lspci -nn 2>/dev/null | awk '/NVIDIA/{print $NF}' | tr -d '[]' | head -1 || true)"
+		[[ -n "${NV_PCI}" ]] && echo "  PCI: ${NV_PCI} (expected 10de:1df0 = GV100GL PG500-216)"
+	fi
 
 	# Ensure device nodes exist (idempotent — hlh-ai-engine-egpu installs the
 	# nvidia-uvm-devices.service for persistence; this covers fresh reboots).

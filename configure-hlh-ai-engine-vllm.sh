@@ -134,17 +134,34 @@ if [[ "$GPU_COUNT" -ne 1 ]]; then
 	nvidia-smi -L 2>&1 | head -10 || true
 	exit 1
 fi
-if ! nvidia-smi -L 2>&1 | grep -qi 'V100'; then
-	echo "FATAL: nvidia-smi -L does not show a Tesla V100." >&2
-	nvidia-smi -L 2>&1 | head -10 || true
-	exit 1
-fi
+# NOTE: this GV100GL board reports its VBIOS product name "Tesla PG500-216" in
+# nvidia-smi (NOT "Tesla V100") — the torch capability check below is the
+# authoritative sm_70 gate.
+echo "  GPU: $(nvidia-smi -L 2>/dev/null | head -1 || true)"
 ldconfig
 if ! ldconfig -p 2>/dev/null | grep -q 'libcuda.so.1'; then
 	echo "FATAL: libcuda.so.1 not resolvable after userspace install (libnvidia-compute-${DRIVER_BRANCH})." >&2
 	exit 1
 fi
 echo "  Driver userspace OK: $(nvidia-smi -L | head -1)"
+
+# VRAM preflight: the V100's 32GB HBM2 is shared with LXC 111 (llama.cpp).
+# vLLM needs ~AI_GPU_MEM_UTIL of total VRAM free at startup.
+MEM_ROW="$(nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 || true)"
+MEM_USED="$(printf '%s\n' "${MEM_ROW}" | awk -F', *' '{print $1}')"
+MEM_TOTAL="$(printf '%s\n' "${MEM_ROW}" | awk -F', *' '{print $2}')"
+if [[ -n "${MEM_USED}" && -n "${MEM_TOTAL}" && "${MEM_TOTAL}" -gt 0 ]]; then
+	MEM_FREE=$((MEM_TOTAL - MEM_USED))
+	NEED_FREE="$(awk -v t="${MEM_TOTAL}" -v u="${GPU_MEM_UTIL}" 'BEGIN{printf "%d", t*u}')"
+	echo "  VRAM: ${MEM_USED} MiB used / ${MEM_TOTAL} MiB (${MEM_FREE} MiB free); vLLM needs ~${NEED_FREE} MiB free (AI_GPU_MEM_UTIL=${GPU_MEM_UTIL})"
+	if [[ "${MEM_FREE}" -lt "${NEED_FREE}" && "${SKIP_VRAM_PREFLIGHT:-0}" != "1" ]]; then
+		echo "FATAL: not enough free VRAM on the shared V100 (${MEM_FREE} MiB free < ~${NEED_FREE} MiB needed)." >&2
+		echo "  Another engine is using ${MEM_USED} MiB — on this host that is LXC 111 (hlh-ai-engine-egpu, llama.cpp)." >&2
+		echo "  Stop it first:  pct exec 111 -- systemctl stop ai-engine" >&2
+		echo "  (override: SKIP_VRAM_PREFLIGHT=1, or lower AI_GPU_MEM_UTIL for co-tenancy)." >&2
+		exit 1
+	fi
+fi
 
 if [[ "${ENABLE_ROOT_PASSWORD_SSH}" == "1" ]]; then
 	mkdir -p /etc/ssh/sshd_config.d
@@ -200,8 +217,10 @@ if not torch.cuda.is_available():
     sys.exit("FATAL: GPU not visible to torch. Check LXC passthrough (/dev/nvidia0, /dev/nvidiactl, /dev/nvidia-uvm).")
 name = torch.cuda.get_device_name(0)
 print("device       :", name)
-if "V100" not in name:
-    sys.exit(f"FATAL: expected Tesla V100, got {name}")
+cc = torch.cuda.get_device_capability(0)
+print("capability   :", cc)
+if cc != (7, 0):
+    sys.exit(f"FATAL: expected Volta sm_70 (7,0), got {cc} on {name}")
 free, total = torch.cuda.mem_get_info()
 print(f"gpu memory   : {free/2**30:.1f} GiB free / {total/2**30:.1f} GiB total (V100 = 32GB HBM2)")
 # Smoke: a real kernel launch on sm_70 (catches 'no kernel image available' early)
