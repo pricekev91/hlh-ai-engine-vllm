@@ -289,3 +289,43 @@ The script unholds the broken 580.178.04 packages, re-pins the full set to
 proceeding. Keep llama.cpp stopped until vLLM is up (VRAM preflight enforces).
 **Watch:** the torch verification step (cu12.8, cc 7.0, fp16 matmul) is the
 first live proof of the whole V100 path.
+
+## 12. 0.6.2 — Triton JIT needs a C compiler (2026-09-25)
+
+**Symptom (3rd live run, fresh LXC 113 from the 0.6.1 in-place update):**
+deploy + configure completed green (torch cu12.8 / cc 7.0 / fp16 matmul all
+passed), Open WebUI up, but `vllm.service` crash-looped. Model weights loaded
+fine (21 GiB / 23 s), then EngineCore died in `_initialize_kv_caches` →
+`profile_run` → dummy multimodal pass → ViT rotary → **Triton kernel launch**:
+`RuntimeError: Failed to find C compiler. Please specify via CC environment
+variable or set triton.knobs.build.impl.` → `Engine core initialization
+failed` → systemd restart loop (Open WebUI stayed up, no inference).
+
+**Root cause:**
+1. On sm_70, FA2/FlashInfer are gated out (cc ≥ 8.0) → vLLM 0.19.1 selects
+   **TRITON_ATTN** as the main attention backend (log: `Using TRITON_ATTN
+   attention backend out of potential backends: ['TRITON_ATTN', 'FLEX_ATTENTION']`)
+   and uses Triton kernels for the Qwen VL rotary (`vllm_flash_attn/ops/triton/
+   rotary.py`) + GDN prefill (`gdn_linear_attn.py`).
+2. Triton JIT-compiles a small **C driver extension** (`triton/backends/nvidia/
+   driver.py` → `compile_module_from_src`) on the **first** kernel launch —
+   needs `cc`. The LXC base install was
+   `apt-get install -y --no-install-recommends curl ca-certificates git
+   openssh-server gnupg python3 libgomp1` — **no compiler**.
+3. The torch-only [4/8] gate never launches a Triton kernel, so the gap
+   survived deploy and only bit at first `vllm serve`.
+
+**Fix (0.6.2):** configure installs `gcc g++` with base packages + hard gate
+on `cc`; [4/8] now runs a real Triton JIT compile+launch (trivial `tl.store`
+kernel) which also pre-warms `/root/.triton`. Immediate fix for an already
+deployed LXC: `apt-get update && apt-get install -y gcc g++ && systemctl
+restart vllm` (first serve then compiles kernels, ~2–4 min).
+
+**Recovery (user, on prox01):**
+```bash
+pct exec 113 -- bash -lc 'apt-get update -qq && apt-get install -y --no-install-recommends gcc g++ && systemctl restart vllm'
+# wait for first Triton compile, then:
+curl -s http://192.168.1.13:8000/health && curl -s http://192.168.1.13:8000/v1/models
+```
+Note: the LXC recreation rotated its SSH host key → refresh `known_hosts`
+for 192.168.1.13 before ssh from other machines.

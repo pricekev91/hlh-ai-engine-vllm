@@ -95,7 +95,7 @@ The same OCuLink V100 (`c5:00.0`) is passed through to **both** LXCs. Both engin
 
 - **fp16 compute** — vLLM avoids bf16 on CC < 8.0 (`dtype=auto` resolves to fp16 on the V100). bf16-only checkpoints get cast; prefer fp16/GPTQ/Int8 checkpoints.
 - **`--enforce-eager`** is on by default in `/usr/local/bin/vllm-run.sh` (CUDA-graph capture on Volta can be flaky). Remove it there if you want to try graphing.
-- **Attention backend**: vLLM 0.19.1 auto-selects a valid backend per compute capability (flashinfer/flash-attn are gated out on sm_70; it falls back to SDPA). No extra packages needed.
+- **Attention backend**: vLLM 0.19.1 picks **`TRITON_ATTN`** on sm_70 (FA2/FlashInfer need cc ≥ 8.0; only the multimodal encoder uses SDPA). Consequence: the LXC needs a **C compiler (`gcc`)** — Triton JIT-compiles its C driver extension on first kernel launch. Configure installs `gcc`/`g++`, gates on `cc`, and pre-warms the Triton JIT cache at deploy. If you ever see `RuntimeError: Failed to find C compiler`, that's what's missing.
 - **GPTQ-Int4**: Marlin GPTQ kernels require SM80+; on the V100 vLLM falls back to the standard GPTQ kernels (slower, works).
 - **No FP8, no FlashInfer** on sm_70 — expected; avoid FP8 checkpoints.
 - 32 GB HBM2 comfortably holds the 35B-A3B GPTQ-Int4 (~20 GB) with a 16K context at 0.85 util; MoE A3B (≈3B active) gives good tok/s on the V100's 900 GB/s.
@@ -106,6 +106,7 @@ The same OCuLink V100 (`c5:00.0`) is passed through to **both** LXCs. Both engin
 - **`nvidia-smi: command not found` in LXC** → driver userspace missing; re-run configure (installs `libnvidia-compute-580` + `nvidia-utils-580`).
 - **`Failed to initialize NVML: Driver/library version mismatch`** → the LXC userspace version does not exactly match the host kernel driver (NVIDIA rotates 580-branch point releases). Re-run configure — it resolves the host driver's exact version via `apt-cache madison`, unholds, and re-pins the full 5-package set (`libnvidia-compute/cfg1/decode/gpucomp-580`, `nvidia-utils-580`). If the repo no longer carries that driver version, upgrade the host driver to the current 580 tip (`hlh-ai-engine-egpu`) and re-run both.
 - **FATAL "not enough free VRAM on the shared V100"** → LXC 111 (llama.cpp) is holding VRAM on the same card: `pct exec 111 -- systemctl stop ai-engine`, then re-run (or `SKIP_VRAM_PREFLIGHT=1` / lower `AI_GPU_MEM_UTIL` for co-tenancy).
+- **`RuntimeError: Failed to find C compiler` (EngineCore dies in `profile_run`, service crash-loops)** → no `cc` in the LXC: on sm_70 vLLM uses the TRITON_ATTN backend + Triton kernels (ViT rotary, GDN prefill), and Triton JIT-compiles a C driver extension on first launch. Fix in the LXC: `apt-get update && apt-get install -y gcc g++ && systemctl restart vllm` (configure ≥ 0.6.2 installs + gates on gcc and pre-warms the Triton cache; first serve after the fix compiles kernels for a couple of minutes).
 - **`torch.cuda.is_available() == False`** → `/dev/nvidia0`/`/dev/nvidiactl`/`/dev/nvidia-uvm` not bound; redeploy (passthrough block) and restart LXC.
 - **`no kernel image is available for execution on the device`** → you're running a cu13/sm_75+ build; reinstall `vllm==0.19.1` (cu128).
 - **VRAM OOM while LXC 111 is running** → shared card; stop/resize the sibling engine or lower `AI_GPU_MEM_UTIL`.

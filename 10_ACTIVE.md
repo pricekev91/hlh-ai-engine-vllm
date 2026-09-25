@@ -1,5 +1,12 @@
 # Active
 
+## 0.6.2 — Triton JIT needs a C compiler: vLLM crash-loop on fresh LXC (2026-09-25)
+- [x] Diagnose 3rd live run: EngineCore died in `profile_run` (dummy MM pass → ViT rotary Triton kernel) with `RuntimeError: Failed to find C compiler` — sm_70 forces TRITON_ATTN + Triton kernels; Triton JIT-compiles a C driver extension on first launch; LXC base install had no `cc`
+- [x] Configure: `gcc g++` in base packages + hard gate on `cc` + [4/8] Triton JIT smoke (pre-warms `/root/.triton`)
+- [x] README: fix attention-backend note (TRITON_ATTN on sm_70) + troubleshooting entry
+- [ ] **prox01 (LXC 113, already deployed): `pct exec 113 -- bash -lc 'apt-get update -qq && apt-get install -y --no-install-recommends gcc g++ && systemctl restart vllm'`** → wait ~2–4 min for first Triton compile → `curl -s http://192.168.1.13:8000/health` + chat via WebUI
+- [ ] Verify `/v1/models` + a real chat completion end-to-end
+
 ## 0.6.1 — 580-branch apt rotation: userspace/kernel NVML mismatch (2026-09-24)
 - [x] Diagnose 2nd live run failure: transitional CUDA repo index (NVIDIA rotated 580.65.06 → 580.178.04 mid-run) + the script's unpinned fallback installed mismatched 580.178.04 userspace → `Driver/library version mismatch`
 - [x] Verified live repo: `580.65.06-0ubuntu1` listed + downloadable for the full 5-package set after rotation settled

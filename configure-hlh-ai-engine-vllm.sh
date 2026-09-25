@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # configure-hlh-ai-engine-vllm.sh
-# Version: 0.6.0
+# Version: 0.6.2
 # Description: Native vLLM + native Open WebUI on Ubuntu 24.04 LXC (CUDA 12.8)
 #              Target: NVIDIA Tesla V100 GV100GL 32GB (Volta, cc 7.0) via OCuLink eGPU.
 #              No Docker — tok/s first, shared /srv/ai/models.
@@ -72,9 +72,20 @@ for i in $(seq 1 12); do
 done
 apt-get update
 apt-get install -y --no-install-recommends curl ca-certificates git openssh-server \
-  gnupg python3 libgomp1 2>&1 || true
+  gnupg python3 libgomp1 gcc g++ 2>&1 || true
+# gcc/g++ are REQUIRED, not optional: on sm_70 vLLM 0.19.1 picks the TRITON_ATTN
+# attention backend (FA2 needs cc>=8.0) + Triton kernels (ViT rotary, GDN prefill),
+# and Triton JIT-compiles a small C driver extension on FIRST kernel launch.
+# Without a C compiler, EngineCore dies during profile_run with
+# 'RuntimeError: Failed to find C compiler' (0.6.2 live failure).
 # NOTE: no OpenMPI (that was a ROCm torch-wheel dep), no ROCm repo, no CUDA toolkit
 # (the cu128 wheels bundle the CUDA 12.8 runtime; only driver userspace is needed below).
+if ! command -v cc >/dev/null 2>&1; then
+	echo "FATAL: no C compiler (cc) in the LXC — Triton JIT (TRITON_ATTN on sm_70) cannot work." >&2
+	echo "  Fix: apt-get update && apt-get install -y gcc g++" >&2
+	exit 1
+fi
+echo "  C compiler: $(command -v cc) (Triton JIT)"
 
 # --- 1. DRIVER USERSPACE (must match host R580 for the V100) ---
 # Host kernel driver version is visible from the LXC via /proc/driver/nvidia/version.
@@ -270,6 +281,22 @@ a = torch.randn(1024, 1024, device="cuda", dtype=torch.float16)
 b = a @ a
 torch.cuda.synchronize()
 print("cuda matmul  : OK (fp16, sm_70)")
+# Smoke: a real Triton JIT compile+launch (catches 'Failed to find C compiler' early;
+# on sm_70 vLLM runs the TRITON_ATTN backend + Triton kernels, so the first launch
+# must work. Also pre-warms the /root/.triton cache for the first vllm serve).
+import triton
+import triton.language as tl
+
+@triton.jit
+def _triton_smoke(p):
+    tl.store(p, 1.0)
+
+x = torch.empty(1, device="cuda", dtype=torch.float32)
+_triton_smoke[(1,)](x)
+torch.cuda.synchronize()
+if x.item() != 1.0:
+    sys.exit("FATAL: triton smoke kernel produced wrong result")
+print("triton jit   : OK (C compiler present, kernel compiled + ran on sm_70)")
 import vllm
 print("vllm         :", vllm.__version__)
 EOF
