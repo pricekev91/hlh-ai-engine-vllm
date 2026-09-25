@@ -5,6 +5,30 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.6] - 2026-09-25
+
+### Changed — co-tenancy default raised to `AI_GPU_MEM_UTIL=0.33`
+- **Regression from 0.6.4/0.6.5 (0.30 default)**: after a clean nuke-redeploy,
+  vLLM loaded the 4B GPTQ model fine but FATALed at KV-cache sizing:
+  `To serve at least one request with the models's max seq len (16384),
+  6.25 GiB KV cache is needed, which is larger than the available KV cache
+  memory (5.84 GiB)`. 0.30 × 32 GB = 9.6 GiB budget; ~3.8 GiB goes to weights
+  + CUDA overhead, leaving 5.84 GiB — just short of the 6.25 GiB needed for
+  16K context (vLLM's own estimate: max len 15296 at 0.30).
+- **Fix**: co-tenancy default is now **0.33** (~11 GB budget: ~3.8 GB weights
+  + 6.8 GiB KV ≥ 6.25 GiB needed). Still fits alongside LXC 111's ~20 GB
+  llama.cpp load (free 12.4 GB ≥ 10.8 GB budget, ~1.6 GB margin), so the
+  deploy's KEEP_111 budget check still leaves 111 running.
+- Verified live: `llama-server` 20344 MiB + `VLLM::EngineCore` 11254 MiB on
+  the same V100, both serving; `/v1/chat/completions` OK at 16384 max_model_len.
+
+### Fixed — tool-call parser no longer hardcoded for the wrong model
+- `vllm-run.sh` always passed `--enable-auto-tool-choice
+  --tool-call-parser qwen3_coder` (correct for the Qwen3 35B-A3B model, wrong
+  for the Qwen1.5-4B-Chat default). Now gated by new `AI_TOOL_PARSER` env
+  var (default empty = tool choice disabled; set `qwen3_coder` when serving
+  the 35B model).
+
 ## [0.6.5] - 2026-09-25
 
 ### Fixed — userspace re-resolution could destroy the exact 580 pin (repo rotation)

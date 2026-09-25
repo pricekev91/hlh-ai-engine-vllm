@@ -81,17 +81,17 @@ ssh root@192.168.1.13 'cat /etc/vllm.env'
 ssh root@192.168.1.13 'cat /etc/open-webui.env'
 ```
 
-Default model: `/srv/ai/models/Qwen1.5-4B-Chat-GPTQ-Int4` (served as `qwen1.5-4b-chat-gptq-int4`) — the small-model co-tenancy default (see below). Tune `/etc/vllm.env`: `AI_GPU_MEM_UTIL` (default 0.30), `AI_MAX_MODEL_LEN` (default 16384), `AI_API_KEY` (set it — the API is bound 0.0.0.0), `AI_EXTRA_ARGS`.
+Default model: `/srv/ai/models/Qwen1.5-4B-Chat-GPTQ-Int4` (served as `qwen1.5-4b-chat-gptq-int4`) — the small-model co-tenancy default (see below). Tune `/etc/vllm.env`: `AI_GPU_MEM_UTIL` (default 0.33), `AI_MAX_MODEL_LEN` (default 16384), `AI_TOOL_PARSER` (default empty; `qwen3_coder` for the 35B model), `AI_API_KEY` (set it — the API is bound 0.0.0.0), `AI_EXTRA_ARGS`.
 
 ## GPU co-tenancy with hlh-ai-engine-egpu (LXC 111)
 
 The same OCuLink V100 (`c5:00.0`) is passed through to **both** LXCs. Both engines can run simultaneously, but they share the **32 GB HBM2**:
 
 - The egpu engine (llama.cpp) at its default config (27B Q4 + 128K KV) holds ~20-33 GB — most of the card.
-- **Both engines can run at once (v0.6.4):** vLLM's default is now `Qwen1.5-4B-Chat-GPTQ-Int4` at `AI_GPU_MEM_UTIL=0.30` (~10 GB), which fits alongside 111's ~20 GB llama.cpp load (32 − 20 − 10 ≈ 2 GB margin, ~8 GB of the budget left for KV cache). Verified live with both engines serving concurrently.
+- **Both engines can run at once:** vLLM's default is `Qwen1.5-4B-Chat-GPTQ-Int4` at `AI_GPU_MEM_UTIL=0.33` (~11 GB: ~3 GB weights + 6.25 GiB KV at 16K context), which fits alongside 111's ~20 GB llama.cpp load (32 − 20 − 11 ≈ 1 GB margin). Verified live with both engines serving concurrently (20344 + 11254 MiB on the card). Note: 0.30 is NOT enough — vLLM FATALs at startup with “6.25 GiB KV cache needed, 5.84 available” (0.33 was raised in v0.6.6).
 - To serve a **bigger model** (e.g. `Qwen3.6-35B-A3B-GPTQ-Int4`, ~20 GB weights), stop 111 first (`pct exec 111 -- systemctl stop ai-engine`) and raise `AI_GPU_MEM_UTIL` to `0.85` in `/etc/vllm.env`.
 - `nvidia-smi` (host or LXC) shows the combined VRAM usage of both. Compute is time-sliced (no MIG on this GPU): under simultaneous load both engines get slower.
-- **Deploy (v0.6.4):** `deploy-hlh-ai-engine-vllm.sh` stops 111's `ai-engine` only when its VRAM leaves less than vLLM's budget free (`AI_GPU_MEM_UTIL` × 32 GB). At the 0.30 co-tenancy default, 111's ~20 GB load is left running, so `git pull && ./deploy-hlh-ai-engine-vllm.sh --destroy` stays unattended *and* co-tenant. `KEEP_111=1` = never stop (then lower `AI_GPU_MEM_UTIL` or `SKIP_VRAM_PREFLIGHT=1`).
+- **Deploy (v0.6.4):** `deploy-hlh-ai-engine-vllm.sh` stops 111's `ai-engine` only when its VRAM leaves less than vLLM's budget free (`AI_GPU_MEM_UTIL` × 32 GB). At the 0.33 co-tenancy default, 111's ~20 GB load is left running, so `git pull && ./deploy-hlh-ai-engine-vllm.sh --destroy` stays unattended *and* co-tenant. `KEEP_111=1` = never stop (then lower `AI_GPU_MEM_UTIL` or `SKIP_VRAM_PREFLIGHT=1`).
 
 ## V100 performance notes (Volta sm_70)
 
@@ -100,7 +100,7 @@ The same OCuLink V100 (`c5:00.0`) is passed through to **both** LXCs. Both engin
 - **Attention backend**: vLLM 0.19.1 picks **`TRITON_ATTN`** on sm_70 (FA2/FlashInfer need cc ≥ 8.0; only the multimodal encoder uses SDPA). Consequence: the LXC needs a **C compiler (`gcc`)** — Triton JIT-compiles its C driver extension on first kernel launch. Configure installs `gcc`/`g++`, gates on `cc`, and pre-warms the Triton JIT cache at deploy. If you ever see `RuntimeError: Failed to find C compiler`, that's what's missing.
 - **GPTQ-Int4**: Marlin GPTQ kernels require SM80+; on the V100 vLLM falls back to the standard GPTQ kernels (slower, works).
 - **No FP8, no FlashInfer** on sm_70 — expected; avoid FP8 checkpoints.
-- 32 GB HBM2 comfortably holds the 35B-A3B GPTQ-Int4 (~20 GB) with a 16K context at 0.85 util (V100 dedicated — stop LXC 111 first); MoE A3B (≈3B active) gives good tok/s on the V100's 900 GB/s. The 4B co-tenancy default uses ~3 GB of its 9.6 GB (0.30) budget for weights.
+- 32 GB HBM2 comfortably holds the 35B-A3B GPTQ-Int4 (~20 GB) with a 16K context at 0.85 util (V100 dedicated — stop LXC 111 first); MoE A3B (≈3B active) gives good tok/s on the V100's 900 GB/s. The 4B co-tenancy default uses ~3 GB of its ~11 GB (0.33) budget for weights (the rest is 16K-context KV cache).
 
 ## Troubleshooting
 

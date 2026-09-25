@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # configure-hlh-ai-engine-vllm.sh
-# Version: 0.6.5
+# Version: 0.6.6
 # Description: Native vLLM + native Open WebUI on Ubuntu 24.04 LXC (CUDA 12.8)
 #              Target: NVIDIA Tesla V100 GV100GL 32GB (Volta, cc 7.0) via OCuLink eGPU.
 #              No Docker — tok/s first, shared /srv/ai/models.
@@ -34,8 +34,10 @@ WEBUI_PORT="${WEBUI_PORT:-80}"
 MODEL_DIR="${MODEL_DIR:-/srv/ai/models}"
 DEFAULT_MODEL_PATH="${DEFAULT_MODEL_PATH:-${MODEL_DIR}/Qwen1.5-4B-Chat-GPTQ-Int4}"
 DEFAULT_MODEL_NAME="${DEFAULT_MODEL_NAME:-qwen1.5-4b-chat-gptq-int4}"
-GPU_MEM_UTIL="${AI_GPU_MEM_UTIL:-0.30}"        # 0.30 of 32GB HBM2 (~10GB): co-tenancy default —
+GPU_MEM_UTIL="${AI_GPU_MEM_UTIL:-0.33}"        # 0.33 of 32GB HBM2 (~11GB): co-tenancy default —
                                                # V100 is shared with LXC 111 (llama.cpp, ~20GB).
+                                               # 0.30 is TOO SMALL: 4B GPTQ at 16K context needs 6.25GiB KV
+                                               # cache but 0.30 only leaves 5.84GiB after weights (vLLM FATAL).
                                                # Raise to 0.85 (stop 111 first) for big models like 35B-A3B.
 MAX_MODEL_LEN="${AI_MAX_MODEL_LEN:-16384}"
 ENABLE_ROOT_PASSWORD_SSH="${ENABLE_ROOT_PASSWORD_SSH:-1}"
@@ -388,6 +390,9 @@ AI_MODEL_PATH=${DEFAULT_MODEL_PATH}
 AI_SERVED_NAME=${DEFAULT_MODEL_NAME}
 AI_GPU_MEM_UTIL=${GPU_MEM_UTIL}
 AI_MAX_MODEL_LEN=${MAX_MODEL_LEN}
+# Tool-call parser for auto tool choice (empty = tool choice disabled).
+# Qwen1.5-4B-Chat: leave empty. Qwen3.6-35B-A3B: AI_TOOL_PARSER=qwen3_coder
+AI_TOOL_PARSER=""
 # Prometheus metrics always exposed at http://${AI_PORT}/metrics (prometheus_client, no flag needed)
 # Optional: require this bearer token on the API (recommended, host is 0.0.0.0)
 AI_API_KEY=""
@@ -399,9 +404,11 @@ VLLM_LOGGING_LEVEL=INFO
 # Compute dtype is fp16 (vLLM avoids bf16 on CC<8.0). --enforce-eager is on by default
 # in /usr/local/bin/vllm-run.sh (safe on Volta); remove it there to try CUDA graphs.
 # The V100's 32GB HBM2 is SHARED with LXC 111 (hlh-ai-engine-egpu, llama.cpp).
-# AI_GPU_MEM_UTIL=0.30 (~10GB) is the co-tenancy default: it fits the 4B GPTQ
-# model alongside 111's ~20GB llama.cpp load. To serve a bigger model (e.g.
-# Qwen3.6-35B-A3B-GPTQ-Int4), stop 111 first and raise AI_GPU_MEM_UTIL to 0.85.
+# AI_GPU_MEM_UTIL=0.33 (~11GB) is the co-tenancy default: it fits the 4B GPTQ
+# model (3GB weights + 6.25GiB KV at 16K context) alongside 111's ~20GB
+# llama.cpp load. 0.30 is too small (KV cache shortfall -> vLLM FATAL at
+# startup). To serve a bigger model (e.g. Qwen3.6-35B-A3B-GPTQ-Int4), stop 111
+# first and raise AI_GPU_MEM_UTIL to 0.85 (set AI_TOOL_PARSER=qwen3_coder for it).
 EOF
 chmod 600 "${ENV_FILE}"
 
@@ -439,13 +446,14 @@ ARGS=(
   --max-model-len "\${AI_MAX_MODEL_LEN}"
   --enforce-eager
   --trust-remote-code
-  --enable-auto-tool-choice
-  --tool-call-parser qwen3_coder
   --limit-mm-per-prompt '{"image":1,"video":1}'
   --mm-processor-cache-gb 1
 )
 if [[ -n "\${AI_API_KEY:-}" ]]; then
   ARGS+=(--api-key "\${AI_API_KEY}")
+fi
+if [[ -n "\${AI_TOOL_PARSER:-}" ]]; then
+  ARGS+=(--enable-auto-tool-choice --tool-call-parser "\${AI_TOOL_PARSER}")
 fi
 if [[ -n "\${AI_EXTRA_ARGS:-}" ]]; then
   read -r -a EXTRA <<< "\${AI_EXTRA_ARGS}"
@@ -604,7 +612,7 @@ systemctl status open-webui --no-pager 2>&1 | tail -15 || true
 
 cat <<SUMMARY
 
-[Bootstrap complete: vLLM ${VLLM_VERSION} CUDA 12.8 (V100 sm_70) + Open WebUI native, script v0.6.5]
+[Bootstrap complete: vLLM ${VLLM_VERSION} CUDA 12.8 (V100 sm_70) + Open WebUI native, script v0.6.6]
   vLLM API   : http://<container-ip>:${AI_PORT}/v1   (health: /health)
   Open WebUI : http://<container-ip>:${WEBUI_PORT}/  (chat UI, BYPASS_MODEL_ACCESS_CONTROL=true)
   Model      : ${DEFAULT_MODEL_PATH} (served as ${DEFAULT_MODEL_NAME})

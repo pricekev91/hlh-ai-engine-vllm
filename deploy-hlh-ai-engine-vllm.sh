@@ -47,7 +47,7 @@ Env overrides (forwarded into LXC bootstrap):
   NVIDIA_DRIVER_VERSION  Host driver to expect (default 580.65.06, R580 last for Volta)
   KEEP_111=1           Never stop LXC 111 (hlh-ai-engine-egpu) on the shared V100.
                        Default: deploy stops 111's ai-engine only if its VRAM leaves
-                       less than vLLM's budget free (default util 0.30 = ~10GB, so
+                       less than vLLM's budget free (default util 0.33 = ~11GB, so
                        111's ~20GB llama.cpp load coexists with the 4B default model).
 
 Examples:
@@ -77,7 +77,7 @@ WEBUI_PORT="80"
 # --- PINNED STACK (V100 Volta cc 7.0 — see SBOM header) ---
 VLLM_VERSION="${VLLM_VERSION:-0.19.1}"
 NVIDIA_DRIVER_VERSION="${NVIDIA_DRIVER_VERSION:-580.65.06}"
-GPU_MEM_UTIL="${AI_GPU_MEM_UTIL:-0.30}"        # co-tenancy default (see configure script)
+GPU_MEM_UTIL="${AI_GPU_MEM_UTIL:-0.33}"        # co-tenancy default (see configure script)
 
 NONINTERACTIVE_MODE=""
 SKIP_HOST_DRIVER=false
@@ -114,7 +114,7 @@ if [[ "${VLLM_VERSION}" != "0.19.1" ]]; then
 	echo "  will not run those builds. Only override with a known sm_70 build." >&2
 fi
 
-echo "=== hlh-ai-engine-vllm deploy v0.6.5 ==="
+echo "=== hlh-ai-engine-vllm deploy v0.6.6 ==="
 echo "  LXC          : ${LXC_ID} (${LXC_NAME}) ${LXC_IP_CONFIG} on ${POOL}"
 echo "  vLLM         : ${VLLM_VERSION} (PyPI CUDA build — last stable with cu128/sm_70)"
 echo "  torch        : 2.10.0+cu128 (pulled by vLLM; bundles CUDA 12.8 runtime)"
@@ -194,7 +194,7 @@ fi
 
 # --- Co-tenancy: V100 is shared with LXC 111 (llama.cpp) — VRAM is shared ---
 # The LXC bootstrap FATALs (VRAM preflight) if free VRAM < AI_GPU_MEM_UTIL*32GB.
-# At the co-tenancy default (0.30 = ~10GB) 111's ~20GB llama.cpp load fits
+# At the co-tenancy default (0.33 = ~11GB) 111's ~20GB llama.cpp load fits
 # alongside, so 111 is left running. Stop it here only when its VRAM actually
 # prevents vLLM's budget from fitting (e.g. util raised to 0.85, or 111 loaded
 # a bigger GGUF). KEEP_111=1 = never stop (then lower AI_GPU_MEM_UTIL or use
