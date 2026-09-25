@@ -114,7 +114,7 @@ if [[ "${VLLM_VERSION}" != "0.19.1" ]]; then
 	echo "  will not run those builds. Only override with a known sm_70 build." >&2
 fi
 
-echo "=== hlh-ai-engine-vllm deploy v0.6.4 ==="
+echo "=== hlh-ai-engine-vllm deploy v0.6.5 ==="
 echo "  LXC          : ${LXC_ID} (${LXC_NAME}) ${LXC_IP_CONFIG} on ${POOL}"
 echo "  vLLM         : ${VLLM_VERSION} (PyPI CUDA build — last stable with cu128/sm_70)"
 echo "  torch        : 2.10.0+cu128 (pulled by vLLM; bundles CUDA 12.8 runtime)"

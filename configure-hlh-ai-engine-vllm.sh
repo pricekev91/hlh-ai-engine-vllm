@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # configure-hlh-ai-engine-vllm.sh
-# Version: 0.6.3
+# Version: 0.6.5
 # Description: Native vLLM + native Open WebUI on Ubuntu 24.04 LXC (CUDA 12.8)
 #              Target: NVIDIA Tesla V100 GV100GL 32GB (Volta, cc 7.0) via OCuLink eGPU.
 #              No Docker — tok/s first, shared /srv/ai/models.
@@ -154,6 +154,9 @@ if [[ -z "${RESOLVED_US}" ]]; then
 	echo "  driver) and re-run. If the repo is mid-rotation, re-run after 'apt-get update'." >&2
 	exit 1
 fi
+# Drop the previous run's pin file (it may reference an older driver
+# version and would block this run's explicit version selection).
+rm -f "/etc/apt/preferences.d/nvidia-${DRIVER_BRANCH}-pin"
 echo "  Installing userspace ${RESOLVED_US} (exact match for host kernel driver ${HOST_DRV}; provides libcuda.so.1, libnvidia-ml.so, nvidia-smi)..."
 if ! apt-get install -y --allow-downgrades --no-install-recommends \
 	"libnvidia-compute-${DRIVER_BRANCH}=${RESOLVED_US}" \
@@ -171,14 +174,45 @@ apt-mark hold \
 	"libnvidia-compute-${DRIVER_BRANCH}" "nvidia-utils-${DRIVER_BRANCH}" \
 	"libnvidia-cfg1-${DRIVER_BRANCH}" "libnvidia-decode-${DRIVER_BRANCH}" \
 	"libnvidia-gpucomp-${DRIVER_BRANCH}" 2>&1 | head -n 8 || true
-# nvidia-persistenced is pulled as a dep of 580 userspace (615.71.09 from Ubuntu)
-# but is not needed in the LXC and blocks downgrades while held. Disable, unhold,
-# remove, then re-hold the 5-package set.
+# Hard gate: all 5 packages must be fully installed at EXACTLY RESOLVED_US.
+# Any drift (half-configured, config-files-only, wrong version) means apt
+# re-resolved part of the set against the repo tip — the GPU would be
+# unusable (NVML mismatch or missing nvidia-smi). Fail loud and early.
+_BAD_PKGS=""
+for _pkg in "libnvidia-compute-${DRIVER_BRANCH}" "nvidia-utils-${DRIVER_BRANCH}" \
+	"libnvidia-cfg1-${DRIVER_BRANCH}" "libnvidia-decode-${DRIVER_BRANCH}" \
+	"libnvidia-gpucomp-${DRIVER_BRANCH}"; do
+	_qs="$(dpkg-query -W -f='${Status}' "${_pkg}" 2>/dev/null || echo 'unknown unknown unknown')"
+	_pv="$(dpkg-query -W -f='${Version}' "${_pkg}" 2>/dev/null || echo '?')"
+	if [[ ( "${_qs}" != "install ok installed" && "${_qs}" != "hold ok installed" ) || "${_pv}" != "${RESOLVED_US}" ]]; then
+		_BAD_PKGS="${_BAD_PKGS} ${_pkg}[${_qs}, ${_pv}]"
+	fi
+done
+if [[ -n "${_BAD_PKGS}" ]]; then
+	echo "FATAL: userspace set not at exact ${RESOLVED_US} after install:${_BAD_PKGS}" >&2
+	echo "  apt re-resolved part of the set (repo rotation / dependency pull)." >&2
+	echo "  Fix: apt-mark unhold the 5 packages, dpkg --purge --force-all them +" >&2
+	echo "  nvidia-persistenced, then re-run this script (it re-pins ${RESOLVED_US})." >&2
+	exit 1
+fi
+# Defense in depth: apt-preferences pin at priority 1001 (may downgrade TO the
+# pinned version, never upgrade OFF it) so any later apt operation — including
+# dependency re-resolution from unrelated installs — cannot move the set.
+# Rewritten every run for the current host driver version.
+printf 'Package: libnvidia-compute-%s nvidia-utils-%s libnvidia-cfg1-%s libnvidia-decode-%s libnvidia-gpucomp-%s\nPin: version %s\nPin-Priority: 1001\n' \
+	"${DRIVER_BRANCH}" "${DRIVER_BRANCH}" "${DRIVER_BRANCH}" "${DRIVER_BRANCH}" "${DRIVER_BRANCH}" "${RESOLVED_US}" \
+	> "/etc/apt/preferences.d/nvidia-${DRIVER_BRANCH}-pin"
+# nvidia-persistenced (615.x from Ubuntu) is a HARD dep of
+# libnvidia-compute-${DRIVER_BRANCH} and gets pulled in by apt. It must not RUN
+# in the LXC (a 615 daemon against the 580 kernel driver; it also pins the
+# GPU), but it must STAY INSTALLED: removing it via apt forces apt to
+# re-resolve the set, and with the set unheld that drags in the repo tip
+# (v0.6.3/0.6.4 regression: compute REMOVED, cfg1/gpucomp/utils upgraded to
+# 580.178.04, nvidia-smi missing, and the re-hold pinned the broken state).
+# Keep it installed, dead and masked.
 if dpkg -s nvidia-persistenced >/dev/null 2>&1; then
 	systemctl disable --now nvidia-persistenced 2>/dev/null || true
-	apt-mark unhold "libnvidia-compute-${DRIVER_BRANCH}" "nvidia-utils-${DRIVER_BRANCH}" "libnvidia-cfg1-${DRIVER_BRANCH}" "libnvidia-decode-${DRIVER_BRANCH}" "libnvidia-gpucomp-${DRIVER_BRANCH}" 2>/dev/null || true
-	apt-get remove -y nvidia-persistenced 2>&1 | tail -n 5 || true
-	apt-mark hold "libnvidia-compute-${DRIVER_BRANCH}" "nvidia-utils-${DRIVER_BRANCH}" "libnvidia-cfg1-${DRIVER_BRANCH}" "libnvidia-decode-${DRIVER_BRANCH}" "libnvidia-gpucomp-${DRIVER_BRANCH}" 2>/dev/null || true
+	systemctl mask nvidia-persistenced 2>/dev/null || true
 fi
 
 # Hard gates: nvidia-smi sees the V100, libcuda.so.1 resolves
@@ -570,7 +604,7 @@ systemctl status open-webui --no-pager 2>&1 | tail -15 || true
 
 cat <<SUMMARY
 
-[Bootstrap complete: vLLM ${VLLM_VERSION} CUDA 12.8 (V100 sm_70) + Open WebUI native, script v0.6.4]
+[Bootstrap complete: vLLM ${VLLM_VERSION} CUDA 12.8 (V100 sm_70) + Open WebUI native, script v0.6.5]
   vLLM API   : http://<container-ip>:${AI_PORT}/v1   (health: /health)
   Open WebUI : http://<container-ip>:${WEBUI_PORT}/  (chat UI, BYPASS_MODEL_ACCESS_CONTROL=true)
   Model      : ${DEFAULT_MODEL_PATH} (served as ${DEFAULT_MODEL_NAME})

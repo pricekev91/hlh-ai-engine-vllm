@@ -5,6 +5,42 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.5] - 2026-09-25
+
+### Fixed — userspace re-resolution could destroy the exact 580 pin (repo rotation)
+- **Regression from the 0.6.3 persistenced removal**: after the pinned install +
+  `apt-mark hold`, configure unheld the 5-package set and ran
+  `apt-get remove -y nvidia-persistenced`. Because
+  `libnvidia-compute-<br>` hard-depends on `nvidia-persistenced`, apt
+  re-resolved the now-unheld set: it **REMOVED** `libnvidia-compute-580`
+  (65.06), **UPGRADED** `cfg1`/`gpucomp`/`utils` to the repo tip
+  (`580.178.04`, where `nvidia-utils-580` is a transitional dummy that no
+  longer provides `nvidia-smi`), and left dpkg half-configured. The
+  subsequent re-hold then **pinned the broken state**. Hit live on 2026-09-25
+  while the CUDA repo rotated 580.65.06 → 580.178.04:
+  `nvidia-smi: command not found` → `FATAL: expected exactly 1 GPU, found 0`.
+- **Fix**: `nvidia-persistenced` (615.x from Ubuntu) is a HARD dep of
+  `libnvidia-compute-<br>` — it can only be removed by removing compute too.
+  It now STAYS INSTALLED but is `systemctl disable --now` + `mask`ed (it must
+  not run: a 615 daemon against the 580 kernel driver, and it pins the GPU).
+  No apt transaction touches the 5-package set after the pinned install.
+- **New hard gate**: after install, all 5 packages must be
+  `install/hold ok installed` at EXACTLY the resolved version — any dpkg state
+  drift (half-configured, config-files-only, wrong version) is a loud FATAL
+  with the per-package state, instead of surfacing later as "0 GPUs".
+- **Defense in depth**: `/etc/apt/preferences.d/nvidia-<br>-pin` pins all 5
+  packages at `Pin-Priority: 1001` (may downgrade TO the pinned version, never
+  upgrade OFF it), so any later apt operation — including dependency
+  re-resolution from unrelated installs — cannot move the set. The pin is
+  rewritten every run for the current host driver version (the previous run's
+  pin is removed before the install so a driver upgrade can re-pin cleanly).
+- **Recovery** (for an LXC already hit, e.g. 113 on 2026-09-25):
+  `apt-mark unhold` the 5, `dpkg --purge --force-all` them +
+  `nvidia-persistenced`, then re-run configure (it re-pins the exact version;
+  the debs are usually still in `/var/cache/apt/archives`). Note: dpkg `hi`
+  state = **h**old + **i**nstalled (healthy), NOT half-configured — check
+  `${Status}` (e.g. `hold ok installed`) before concluding damage.
+
 ## [0.6.4] - 2026-09-25
 
 ### Changed
