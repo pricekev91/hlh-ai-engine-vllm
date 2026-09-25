@@ -315,15 +315,19 @@ failed` → systemd restart loop (Open WebUI stayed up, no inference).
 3. The torch-only [4/8] gate never launches a Triton kernel, so the gap
    survived deploy and only bit at first `vllm serve`.
 
-**Fix (0.6.2):** configure installs `gcc g++` with base packages + hard gate
-on `cc`; [4/8] now runs a real Triton JIT compile+launch (trivial `tl.store`
-kernel) which also pre-warms `/root/.triton`. Immediate fix for an already
-deployed LXC: `apt-get update && apt-get install -y gcc g++ && systemctl
-restart vllm` (first serve then compiles kernels, ~2–4 min).
+**Fix (0.6.2):** configure installs `gcc g++ python3-dev` with base packages +
+hard gates on `cc` and `Python.h`; [4/8] now runs a real Triton JIT compile+
+launch (trivial `tl.store` kernel — from a real file, since triton @jit needs
+inspectable source) which also pre-warms `/root/.triton`. Two failure layers
+found live: no `cc` → 'Failed to find C compiler'; `cc` present but no
+`python3-dev` → 'fatal error: Python.h: No such file or directory'.
+Immediate fix for an already deployed LXC: `apt-get update && apt-get install
+-y gcc g++ python3-dev && systemctl restart vllm` (first serve then compiles
+kernels, ~2–4 min).
 
 **Recovery (user, on prox01):**
 ```bash
-pct exec 113 -- bash -lc 'apt-get update -qq && apt-get install -y --no-install-recommends gcc g++ && systemctl restart vllm'
+pct exec 113 -- bash -lc 'apt-get update -qq && apt-get install -y --no-install-recommends gcc g++ python3-dev && systemctl restart vllm'
 # wait for first Triton compile, then:
 curl -s http://192.168.1.13:8000/health && curl -s http://192.168.1.13:8000/v1/models
 ```

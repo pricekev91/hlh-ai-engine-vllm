@@ -72,12 +72,13 @@ for i in $(seq 1 12); do
 done
 apt-get update
 apt-get install -y --no-install-recommends curl ca-certificates git openssh-server \
-  gnupg python3 libgomp1 gcc g++ 2>&1 || true
-# gcc/g++ are REQUIRED, not optional: on sm_70 vLLM 0.19.1 picks the TRITON_ATTN
-# attention backend (FA2 needs cc>=8.0) + Triton kernels (ViT rotary, GDN prefill),
-# and Triton JIT-compiles a small C driver extension on FIRST kernel launch.
-# Without a C compiler, EngineCore dies during profile_run with
-# 'RuntimeError: Failed to find C compiler' (0.6.2 live failure).
+  gnupg python3 libgomp1 gcc g++ python3-dev 2>&1 || true
+# gcc/g++ + python3-dev are REQUIRED, not optional: on sm_70 vLLM 0.19.1 picks the
+# TRITON_ATTN attention backend (FA2 needs cc>=8.0) + Triton kernels (ViT rotary,
+# GDN prefill), and Triton JIT-compiles a small C driver extension on FIRST kernel
+# launch. Without a C compiler, EngineCore dies during profile_run with
+# 'RuntimeError: Failed to find C compiler'; with cc but no Python headers it dies
+# with 'Python.h: No such file or directory' (both 0.6.2 live failures).
 # NOTE: no OpenMPI (that was a ROCm torch-wheel dep), no ROCm repo, no CUDA toolkit
 # (the cu128 wheels bundle the CUDA 12.8 runtime; only driver userspace is needed below).
 if ! command -v cc >/dev/null 2>&1; then
@@ -85,7 +86,12 @@ if ! command -v cc >/dev/null 2>&1; then
 	echo "  Fix: apt-get update && apt-get install -y gcc g++" >&2
 	exit 1
 fi
-echo "  C compiler: $(command -v cc) (Triton JIT)"
+if ! ls /usr/include/python3.*/Python.h >/dev/null 2>&1; then
+	echo "FATAL: Python.h missing in the LXC — Triton JIT cannot compile its C driver extension." >&2
+	echo "  Fix: apt-get update && apt-get install -y python3-dev" >&2
+	exit 1
+fi
+echo "  C compiler: $(command -v cc) + Python.h (Triton JIT)"
 
 # --- 1. DRIVER USERSPACE (must match host R580 for the V100) ---
 # Host kernel driver version is visible from the LXC via /proc/driver/nvidia/version.
@@ -261,7 +267,12 @@ if grep -qiE '^nvidia-.*cu13' <<<"${PKGS}"; then
 	exit 1
 fi
 
-"${PY}" - <<'EOF'
+# NOTE: the verify script MUST run from a real file, not stdin: triton @jit
+# kernels require inspectable source ('@jit functions should be defined in a
+# Python file') — running via `python - <<EOF` dies with ValueError.
+# Fixed path keeps the Triton cache key stable across re-runs.
+_verify_py=/tmp/vllm-verify.py
+cat > "${_verify_py}" <<'EOF'
 import sys, torch
 print("torch        :", torch.__version__)
 if torch.version.cuda != "12.8":
@@ -300,6 +311,12 @@ print("triton jit   : OK (C compiler present, kernel compiled + ran on sm_70)")
 import vllm
 print("vllm         :", vllm.__version__)
 EOF
+if ! "${PY}" "${_verify_py}"; then
+	rm -f "${_verify_py}"
+	echo "FATAL: vLLM verification failed (see traceback above)." >&2
+	exit 1
+fi
+rm -f "${_verify_py}"
 
 # --- 5. OPEN-WEBUI VENV (native, same LXC, no docker) ---
 echo "[5/8] Installing Open WebUI (native, port ${WEBUI_PORT})..."

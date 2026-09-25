@@ -9,12 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **vLLM crash-looped with `RuntimeError: Failed to find C compiler`** (3rd live run): on sm_70 vLLM 0.19.1 selects the **TRITON_ATTN** attention backend (FA2 needs cc ≥ 8.0) plus Triton kernels for the ViT rotary + GDN prefill; Triton JIT-compiles a small C driver extension on the **first** kernel launch, which needs `cc`. The LXC base install (`--no-install-recommends: curl ca-certificates git openssh-server gnupg python3 libgomp1`) had no compiler, so EngineCore died during the KV-cache `profile_run` (dummy multimodal pass) and systemd restart-looped — the model weights themselves loaded fine (21 GiB / 23 s).
-- Configure now installs **`gcc g++`** with the base packages and **hard-gates on `cc`** (FATAL with the one-line fix instead of a cryptic runtime crash).
+- Configure now installs **`gcc g++ python3-dev`** with the base packages and **hard-gates on `cc` + `Python.h`** (FATAL with the one-line fix instead of a cryptic runtime crash). `python3-dev` is required too: with `cc` present but no headers, the same first Triton launch dies with `fatal error: Python.h: No such file or directory` (2nd live failure, caught by the new smoke test).
 - [4/8] verification now runs a **real Triton JIT compile + launch** (trivial `tl.store` kernel on sm_70) — catches the missing-compiler class of failure at deploy time and **pre-warms the `/root/.triton` cache** so the first `vllm serve` doesn't pay the compile tax.
 
 ### Docs
 - README: corrected the attention-backend note (sm_70 → **TRITON_ATTN**, not "falls back to SDPA" — only the MM encoder uses SDPA) and added a `Failed to find C compiler` troubleshooting entry with the in-LXC fix.
-- Immediate fix for an already-deployed LXC: `apt-get update && apt-get install -y gcc g++ && systemctl restart vllm`.
+- Immediate fix for an already-deployed LXC: `apt-get update && apt-get install -y gcc g++ python3-dev && systemctl restart vllm`.
 
 ## [0.6.1] - 2026-09-24
 
