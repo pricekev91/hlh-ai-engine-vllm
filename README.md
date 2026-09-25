@@ -81,16 +81,17 @@ ssh root@192.168.1.13 'cat /etc/vllm.env'
 ssh root@192.168.1.13 'cat /etc/open-webui.env'
 ```
 
-Default model: `/srv/ai/models/Qwen3.6-35B-A3B-GPTQ-Int4` (served as `qwen3.6-35b-a3b-gptq-int4`). Tune `/etc/vllm.env`: `AI_GPU_MEM_UTIL` (default 0.85), `AI_MAX_MODEL_LEN` (default 16384), `AI_API_KEY` (set it — the API is bound 0.0.0.0), `AI_EXTRA_ARGS`.
+Default model: `/srv/ai/models/Qwen1.5-4B-Chat-GPTQ-Int4` (served as `qwen1.5-4b-chat-gptq-int4`) — the small-model co-tenancy default (see below). Tune `/etc/vllm.env`: `AI_GPU_MEM_UTIL` (default 0.30), `AI_MAX_MODEL_LEN` (default 16384), `AI_API_KEY` (set it — the API is bound 0.0.0.0), `AI_EXTRA_ARGS`.
 
 ## GPU co-tenancy with hlh-ai-engine-egpu (LXC 111)
 
 The same OCuLink V100 (`c5:00.0`) is passed through to **both** LXCs. Both engines can run simultaneously, but they share the **32 GB HBM2**:
 
-- The egpu engine (llama.cpp) at its default config (27B Q4 + 128K KV) uses ~33 GB — effectively the whole card.
-- If you want vLLM on the V100, **stop LXC 111's server** (`pct exec 111 -- systemctl stop ai-engine`) or right-size it (shorter context, smaller model) and lower vLLM's `AI_GPU_MEM_UTIL` (e.g. `0.45`).
-- `nvidia-smi` (host or LXC) shows the combined VRAM usage of both.
-- **Deploy codified (v0.6.3):** `deploy-hlh-ai-engine-vllm.sh` now auto-detects `111` holding >4GB VRAM and `systemctl stop ai-engine` before bootstrapping `113`, so a fresh `git pull && ./deploy-hlh-ai-engine-vllm.sh --destroy` is unattended. Set `KEEP_111=1` to preserve 111 (then use `SKIP_VRAM_PREFLIGHT=1` or lower `AI_GPU_MEM_UTIL` for co-tenancy).
+- The egpu engine (llama.cpp) at its default config (27B Q4 + 128K KV) holds ~20-33 GB — most of the card.
+- **Both engines can run at once (v0.6.4):** vLLM's default is now `Qwen1.5-4B-Chat-GPTQ-Int4` at `AI_GPU_MEM_UTIL=0.30` (~10 GB), which fits alongside 111's ~20 GB llama.cpp load (32 − 20 − 10 ≈ 2 GB margin, ~8 GB of the budget left for KV cache). Verified live with both engines serving concurrently.
+- To serve a **bigger model** (e.g. `Qwen3.6-35B-A3B-GPTQ-Int4`, ~20 GB weights), stop 111 first (`pct exec 111 -- systemctl stop ai-engine`) and raise `AI_GPU_MEM_UTIL` to `0.85` in `/etc/vllm.env`.
+- `nvidia-smi` (host or LXC) shows the combined VRAM usage of both. Compute is time-sliced (no MIG on this GPU): under simultaneous load both engines get slower.
+- **Deploy (v0.6.4):** `deploy-hlh-ai-engine-vllm.sh` stops 111's `ai-engine` only when its VRAM leaves less than vLLM's budget free (`AI_GPU_MEM_UTIL` × 32 GB). At the 0.30 co-tenancy default, 111's ~20 GB load is left running, so `git pull && ./deploy-hlh-ai-engine-vllm.sh --destroy` stays unattended *and* co-tenant. `KEEP_111=1` = never stop (then lower `AI_GPU_MEM_UTIL` or `SKIP_VRAM_PREFLIGHT=1`).
 
 ## V100 performance notes (Volta sm_70)
 
@@ -99,7 +100,7 @@ The same OCuLink V100 (`c5:00.0`) is passed through to **both** LXCs. Both engin
 - **Attention backend**: vLLM 0.19.1 picks **`TRITON_ATTN`** on sm_70 (FA2/FlashInfer need cc ≥ 8.0; only the multimodal encoder uses SDPA). Consequence: the LXC needs a **C compiler (`gcc`)** — Triton JIT-compiles its C driver extension on first kernel launch. Configure installs `gcc`/`g++`, gates on `cc`, and pre-warms the Triton JIT cache at deploy. If you ever see `RuntimeError: Failed to find C compiler`, that's what's missing.
 - **GPTQ-Int4**: Marlin GPTQ kernels require SM80+; on the V100 vLLM falls back to the standard GPTQ kernels (slower, works).
 - **No FP8, no FlashInfer** on sm_70 — expected; avoid FP8 checkpoints.
-- 32 GB HBM2 comfortably holds the 35B-A3B GPTQ-Int4 (~20 GB) with a 16K context at 0.85 util; MoE A3B (≈3B active) gives good tok/s on the V100's 900 GB/s.
+- 32 GB HBM2 comfortably holds the 35B-A3B GPTQ-Int4 (~20 GB) with a 16K context at 0.85 util (V100 dedicated — stop LXC 111 first); MoE A3B (≈3B active) gives good tok/s on the V100's 900 GB/s. The 4B co-tenancy default uses ~3 GB of its 9.6 GB (0.30) budget for weights.
 
 ## Troubleshooting
 

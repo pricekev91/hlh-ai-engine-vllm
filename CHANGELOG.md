@@ -5,6 +5,17 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.4] - 2026-09-25
+
+### Changed
+- **Default model → `Qwen1.5-4B-Chat-GPTQ-Int4`, `AI_GPU_MEM_UTIL` 0.85 → 0.30 (co-tenancy default).** The 35B-A3B default (~20 GB weights, 0.85 = 27.4 GB budget) could not start while LXC 111 (llama.cpp) held ~20 GB on the shared V100 — effectively only one engine could run at a time. The 4B GPTQ-Int4 (~3 GB weights) at 0.30 util (~9.6 GB budget) fits alongside 111's ~20 GB load with ~8 GB left for KV cache; verified live with both engines serving concurrently. Bigger models (35B-A3B) still work: stop 111 first and set `AI_GPU_MEM_UTIL=0.85`.
+- **Deploy stops LXC 111 only when its VRAM actually blocks vLLM's budget** (was: always when >4 GB held). Condition is now `free VRAM < AI_GPU_MEM_UTIL × 32 GB`, so a `--destroy`/`--update` deploy leaves 111 running under the co-tenancy default. `KEEP_111=1` semantics unchanged (never stop).
+- `deploy` now forwards `AI_GPU_MEM_UTIL` to the bootstrap (previously configure-only default, so host-side budget math and LXC could diverge).
+
+### Notes
+- `Qwen1.5-4B-Chat-GPTQ-Int4` is expected at `/srv/ai/models/Qwen1.5-4B-Chat-GPTQ-Int4` (3.0 GB; `dl-hf.sh Qwen/Qwen1.5-4B-Chat-GPTQ-Int4`).
+- `/etc/vllm.env` in an existing LXC keeps its old values until `--update` re-runs configure.
+
 ## [0.6.3] - 2026-09-25
 
 ### Fixed

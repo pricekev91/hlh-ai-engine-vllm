@@ -32,9 +32,11 @@ WEBUI_VENV_DIR="${WEBUI_VENV_DIR:-/opt/open-webui-venv}"
 AI_PORT="${AI_PORT:-8000}"
 WEBUI_PORT="${WEBUI_PORT:-80}"
 MODEL_DIR="${MODEL_DIR:-/srv/ai/models}"
-DEFAULT_MODEL_PATH="${DEFAULT_MODEL_PATH:-${MODEL_DIR}/Qwen3.6-35B-A3B-GPTQ-Int4}"
-DEFAULT_MODEL_NAME="${DEFAULT_MODEL_NAME:-qwen3.6-35b-a3b-gptq-int4}"
-GPU_MEM_UTIL="${AI_GPU_MEM_UTIL:-0.85}"        # 0.85 of 32GB HBM2 when V100 is dedicated
+DEFAULT_MODEL_PATH="${DEFAULT_MODEL_PATH:-${MODEL_DIR}/Qwen1.5-4B-Chat-GPTQ-Int4}"
+DEFAULT_MODEL_NAME="${DEFAULT_MODEL_NAME:-qwen1.5-4b-chat-gptq-int4}"
+GPU_MEM_UTIL="${AI_GPU_MEM_UTIL:-0.30}"        # 0.30 of 32GB HBM2 (~10GB): co-tenancy default —
+                                               # V100 is shared with LXC 111 (llama.cpp, ~20GB).
+                                               # Raise to 0.85 (stop 111 first) for big models like 35B-A3B.
 MAX_MODEL_LEN="${AI_MAX_MODEL_LEN:-16384}"
 ENABLE_ROOT_PASSWORD_SSH="${ENABLE_ROOT_PASSWORD_SSH:-1}"
 
@@ -362,8 +364,10 @@ VLLM_LOGGING_LEVEL=INFO
 # --- V100 (Volta sm_70) notes ---
 # Compute dtype is fp16 (vLLM avoids bf16 on CC<8.0). --enforce-eager is on by default
 # in /usr/local/bin/vllm-run.sh (safe on Volta); remove it there to try CUDA graphs.
-# The V100's 32GB HBM2 is SHARED with LXC 111 (hlh-ai-engine-egpu, llama.cpp): if both
-# engines run, lower AI_GPU_MEM_UTIL (e.g. 0.45) or stop the sibling first.
+# The V100's 32GB HBM2 is SHARED with LXC 111 (hlh-ai-engine-egpu, llama.cpp).
+# AI_GPU_MEM_UTIL=0.30 (~10GB) is the co-tenancy default: it fits the 4B GPTQ
+# model alongside 111's ~20GB llama.cpp load. To serve a bigger model (e.g.
+# Qwen3.6-35B-A3B-GPTQ-Int4), stop 111 first and raise AI_GPU_MEM_UTIL to 0.85.
 EOF
 chmod 600 "${ENV_FILE}"
 
@@ -566,7 +570,7 @@ systemctl status open-webui --no-pager 2>&1 | tail -15 || true
 
 cat <<SUMMARY
 
-[Bootstrap complete: vLLM ${VLLM_VERSION} CUDA 12.8 (V100 sm_70) + Open WebUI native, script v0.6.3]
+[Bootstrap complete: vLLM ${VLLM_VERSION} CUDA 12.8 (V100 sm_70) + Open WebUI native, script v0.6.4]
   vLLM API   : http://<container-ip>:${AI_PORT}/v1   (health: /health)
   Open WebUI : http://<container-ip>:${WEBUI_PORT}/  (chat UI, BYPASS_MODEL_ACCESS_CONTROL=true)
   Model      : ${DEFAULT_MODEL_PATH} (served as ${DEFAULT_MODEL_NAME})

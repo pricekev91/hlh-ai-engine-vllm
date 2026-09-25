@@ -28,7 +28,7 @@ This is the direct Proxmox bootstrap path (pure bash, 2-file KISS):
 	4) Start container
 	5) Push/run configure-hlh-ai-engine-vllm.sh inside LXC (native vLLM 0.19.1 cu128
 	   + native Open WebUI via uv, no docker)
-	   vLLM serving /srv/ai/models/Qwen3.6-35B-A3B-GPTQ-Int4 on :8000, WebUI on :80
+	   vLLM serving /srv/ai/models/Qwen1.5-4B-Chat-GPTQ-Int4 on :8000, WebUI on :80
 
 If LXC 113 already exists, interactive prompt offers:
   y = destroy & recreate from scratch (full rebuild, ~10-20 min)
@@ -45,9 +45,10 @@ Env overrides (forwarded into LXC bootstrap):
   VLLM_VERSION=x.y.z   Pin vLLM (default 0.19.1 = last stable with cu128/sm_70).
                        WARNING: 0.20.0+ pulls torch 2.11+cu13 which dropped Volta.
   NVIDIA_DRIVER_VERSION  Host driver to expect (default 580.65.06, R580 last for Volta)
-  KEEP_111=1           Keep LXC 111 (hlh-ai-engine-egpu) running on shared V100.
-                       Default: deploy stops 111's ai-engine if it holds >4GB VRAM
-                       (greenfield: vLLM needs ~27GB free at 0.85 util).
+  KEEP_111=1           Never stop LXC 111 (hlh-ai-engine-egpu) on the shared V100.
+                       Default: deploy stops 111's ai-engine only if its VRAM leaves
+                       less than vLLM's budget free (default util 0.30 = ~10GB, so
+                       111's ~20GB llama.cpp load coexists with the 4B default model).
 
 Examples:
   ./deploy-hlh-ai-engine-vllm.sh                    # full deploy
@@ -70,12 +71,13 @@ LXC_CORES="12"
 LXC_IP_CONFIG="192.168.1.13/24"
 LXC_GATEWAY="192.168.1.1"
 VLLM_MODEL_DIR="/srv/ai/models"
-VLLM_DEFAULT_MODEL="Qwen3.6-35B-A3B-GPTQ-Int4"
+VLLM_DEFAULT_MODEL="Qwen1.5-4B-Chat-GPTQ-Int4"
 WEBUI_PORT="80"
 
 # --- PINNED STACK (V100 Volta cc 7.0 — see SBOM header) ---
 VLLM_VERSION="${VLLM_VERSION:-0.19.1}"
 NVIDIA_DRIVER_VERSION="${NVIDIA_DRIVER_VERSION:-580.65.06}"
+GPU_MEM_UTIL="${AI_GPU_MEM_UTIL:-0.30}"        # co-tenancy default (see configure script)
 
 NONINTERACTIVE_MODE=""
 SKIP_HOST_DRIVER=false
@@ -112,13 +114,13 @@ if [[ "${VLLM_VERSION}" != "0.19.1" ]]; then
 	echo "  will not run those builds. Only override with a known sm_70 build." >&2
 fi
 
-echo "=== hlh-ai-engine-vllm deploy v0.6.3 ==="
+echo "=== hlh-ai-engine-vllm deploy v0.6.4 ==="
 echo "  LXC          : ${LXC_ID} (${LXC_NAME}) ${LXC_IP_CONFIG} on ${POOL}"
 echo "  vLLM         : ${VLLM_VERSION} (PyPI CUDA build — last stable with cu128/sm_70)"
 echo "  torch        : 2.10.0+cu128 (pulled by vLLM; bundles CUDA 12.8 runtime)"
 echo "  GPU          : Tesla V100 GV100GL 32GB (Volta cc 7.0) via OCuLink c5:00.0"
 echo "  Host driver  : R580 ${NVIDIA_DRIVER_VERSION} (last branch for Volta)"
-echo "  Model dir    : ${MODEL_HOST_DIR} -> ${MODEL_LXC_DIR} (default model: ${VLLM_DEFAULT_MODEL})"
+echo "  Model dir    : ${MODEL_HOST_DIR} -> ${MODEL_LXC_DIR} (default model: ${VLLM_DEFAULT_MODEL}, GPU util: ${GPU_MEM_UTIL})"
 echo "  WebUI        : native at http://192.168.1.13:${WEBUI_PORT}/ (no docker)"
 echo "  Note         : the V100 is also passed through to LXC 111 (hlh-ai-engine-egpu, llama.cpp)."
 echo "                 VRAM (32GB HBM2) is shared — see README 'GPU co-tenancy'."
@@ -191,17 +193,22 @@ else
 fi
 
 # --- Co-tenancy: V100 is shared with LXC 111 (llama.cpp) — VRAM is shared ---
-# Greenfield/nuke would FATAL in the LXC bootstrap (VRAM preflight) if 111 holds
-# ~20GB. This host-side block stops 111's ai-engine automatically so the bootstrap
-# can allocate ~27GB (0.85*32GB). Set KEEP_111=1 to preserve 111 (then lower
-# AI_GPU_MEM_UTIL or use SKIP_VRAM_PREFLIGHT=1 for co-tenancy).
+# The LXC bootstrap FATALs (VRAM preflight) if free VRAM < AI_GPU_MEM_UTIL*32GB.
+# At the co-tenancy default (0.30 = ~10GB) 111's ~20GB llama.cpp load fits
+# alongside, so 111 is left running. Stop it here only when its VRAM actually
+# prevents vLLM's budget from fitting (e.g. util raised to 0.85, or 111 loaded
+# a bigger GGUF). KEEP_111=1 = never stop (then lower AI_GPU_MEM_UTIL or use
+# SKIP_VRAM_PREFLIGHT=1).
 if [[ "${KEEP_111:-0}" != "1" ]] && command -v pct >/dev/null 2>&1 && pct status 111 >/dev/null 2>&1; then
 	if pct status 111 2>&1 | grep -qi "running"; then
 		if pct exec 111 -- systemctl is-active ai-engine >/dev/null 2>&1; then
+			MEM_TOTAL_HOST="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 || echo 32768)"
 			MEM_USED_HOST="$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -1 || echo 0)"
-			# Threshold >4GB indicates 111 is actually holding VRAM (idle = 0-100 MiB)
-			if [[ "${MEM_USED_HOST}" =~ ^[0-9]+$ ]] && [[ "${MEM_USED_HOST}" -gt 4096 ]]; then
-				echo "[1/6] Co-tenancy: LXC 111 ai-engine holds ${MEM_USED_HOST} MiB VRAM on shared V100 — stopping for vLLM deploy..."
+			NEED_FREE_HOST="$(awk -v t="${MEM_TOTAL_HOST}" -v u="${GPU_MEM_UTIL}" 'BEGIN{printf "%d", t*u}')"
+			MEM_FREE_HOST=$(( MEM_TOTAL_HOST - MEM_USED_HOST ))
+			# Stop 111 only if its VRAM leaves less than vLLM's budget free.
+			if [[ "${MEM_FREE_HOST}" -lt "${NEED_FREE_HOST}" ]]; then
+				echo "[1/6] Co-tenancy: LXC 111 ai-engine holds ${MEM_USED_HOST} MiB VRAM on shared V100 (free ${MEM_FREE_HOST} < needed ${NEED_FREE_HOST}) — stopping for vLLM deploy..."
 				echo "  (override: KEEP_111=1 to keep 111 running, then lower AI_GPU_MEM_UTIL or use SKIP_VRAM_PREFLIGHT=1)"
 				pct exec 111 -- systemctl stop ai-engine 2>&1 || true
 				sleep 3
@@ -287,7 +294,7 @@ if [[ "${UPDATE_IN_PLACE}" == "true" ]]; then
 	echo "  Forwarding VLLM_VERSION=${VLLM_VERSION} NVIDIA_DRIVER_VERSION=${NVIDIA_DRIVER_VERSION} -> LXC"
 	pct exec "${LXC_ID}" -- mkdir -p /root/ai-engine-bootstrap
 	pct push "${LXC_ID}" "$BOOTSTRAP_SCRIPT" /root/ai-engine-bootstrap/configure-hlh-ai-engine-vllm.sh --perms 0755
-	pct exec "${LXC_ID}" -- env VLLM_VERSION="${VLLM_VERSION}" NVIDIA_DRIVER_VERSION="${NVIDIA_DRIVER_VERSION}" VLLM_DEFAULT_MODEL="${VLLM_DEFAULT_MODEL}" bash /root/ai-engine-bootstrap/configure-hlh-ai-engine-vllm.sh
+	pct exec "${LXC_ID}" -- env VLLM_VERSION="${VLLM_VERSION}" NVIDIA_DRIVER_VERSION="${NVIDIA_DRIVER_VERSION}" VLLM_DEFAULT_MODEL="${VLLM_DEFAULT_MODEL}" AI_GPU_MEM_UTIL="${GPU_MEM_UTIL}" bash /root/ai-engine-bootstrap/configure-hlh-ai-engine-vllm.sh
 	echo "[6/6] Update complete. LXC ${LXC_ID} (${LXC_NAME}) patched in place (no recreate)."
 	echo "Model storage: ${MODEL_HOST_DIR} (host) <-> ${MODEL_LXC_DIR} (container) on ${POOL}"
 	echo "Backend      : vLLM ${VLLM_VERSION} CUDA 12.8 (V100 GV100 32GB sm_70, native via uv, no docker)"
@@ -381,7 +388,7 @@ echo "[5/6] Running in-container bootstrap (native vLLM CUDA + WebUI)..."
 echo "  Forwarding VLLM_VERSION=${VLLM_VERSION} NVIDIA_DRIVER_VERSION=${NVIDIA_DRIVER_VERSION} -> LXC"
 pct exec "${LXC_ID}" -- mkdir -p /root/ai-engine-bootstrap
 pct push "${LXC_ID}" "$BOOTSTRAP_SCRIPT" /root/ai-engine-bootstrap/configure-hlh-ai-engine-vllm.sh --perms 0755
-pct exec "${LXC_ID}" -- env VLLM_VERSION="${VLLM_VERSION}" NVIDIA_DRIVER_VERSION="${NVIDIA_DRIVER_VERSION}" VLLM_DEFAULT_MODEL="${VLLM_DEFAULT_MODEL}" bash /root/ai-engine-bootstrap/configure-hlh-ai-engine-vllm.sh
+pct exec "${LXC_ID}" -- env VLLM_VERSION="${VLLM_VERSION}" NVIDIA_DRIVER_VERSION="${NVIDIA_DRIVER_VERSION}" VLLM_DEFAULT_MODEL="${VLLM_DEFAULT_MODEL}" AI_GPU_MEM_UTIL="${GPU_MEM_UTIL}" bash /root/ai-engine-bootstrap/configure-hlh-ai-engine-vllm.sh
 
 echo "[5/6] Verifying bootstrap (fail-fast instead of silent port-8000 refused)..."
 pct exec "${LXC_ID}" -- systemctl is-active vllm >/dev/null 2>&1 || { echo "ERROR: vllm.service not active after bootstrap — check: pct exec ${LXC_ID} -- journalctl -u vllm -n 100" >&2; exit 1; }
