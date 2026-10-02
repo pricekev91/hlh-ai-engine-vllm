@@ -77,13 +77,13 @@ WEBUI_PORT="80"
 # --- PINNED STACK (V100 Volta cc 7.0 — see SBOM header) ---
 VLLM_VERSION="${VLLM_VERSION:-0.19.1}"
 NVIDIA_DRIVER_VERSION="${NVIDIA_DRIVER_VERSION:-580.65.06}"
-GPU_MEM_UTIL="${AI_GPU_MEM_UTIL:-0.85}"        # single-vLLM 27B default (111 stopped); override 0.33 for 4B co-tenancy
+GPU_MEM_UTIL="${AI_GPU_MEM_UTIL:-0.95}"        # single-vLLM 27B@32K default (111 stopped); 0.33 for 4B co-tenancy
 # Model + tool-parser overrides (forwarded to configure; configure writes /etc/vllm.env).
 # Defaults now serve Qwen3.6-27B (single-vLLM 113, harness tools via :8000/v1).
 DEFAULT_MODEL_PATH="${DEFAULT_MODEL_PATH:-${VLLM_MODEL_DIR}/Qwen3.6-27B-GPTQ-Int4}"
 DEFAULT_MODEL_NAME="${DEFAULT_MODEL_NAME:-qwen3.6-27b-gptq-int4}"
 TOOL_PARSER="${AI_TOOL_PARSER:-qwen3_coder}"
-MAX_MODEL_LEN="${AI_MAX_MODEL_LEN:-16384}"
+MAX_MODEL_LEN="${AI_MAX_MODEL_LEN:-32768}"
 
 NONINTERACTIVE_MODE=""
 SKIP_HOST_DRIVER=false
@@ -120,7 +120,7 @@ if [[ "${VLLM_VERSION}" != "0.19.1" ]]; then
 	echo "  will not run those builds. Only override with a known sm_70 build." >&2
 fi
 
-echo "=== hlh-ai-engine-vllm deploy v0.6.8 ==="
+echo "=== hlh-ai-engine-vllm deploy v0.6.9 ==="
 echo "  LXC          : ${LXC_ID} (${LXC_NAME}) ${LXC_IP_CONFIG} on ${POOL}"
 echo "  vLLM         : ${VLLM_VERSION} (PyPI CUDA build — last stable with cu128/sm_70)"
 echo "  torch        : 2.10.0+cu128 (pulled by vLLM; bundles CUDA 12.8 runtime)"

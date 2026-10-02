@@ -81,7 +81,7 @@ ssh root@192.168.1.13 'cat /etc/vllm.env'
 ssh root@192.168.1.13 'cat /etc/open-webui.env'
 ```
 
-Default model: `/srv/ai/models/Qwen3.6-27B-GPTQ-Int4` (served as `qwen3.6-27b-gptq-int4`) — single-vLLM on 113, LXC 111 stays stopped. Tune `/etc/vllm.env`: `AI_GPU_MEM_UTIL` (default 0.85), `AI_MAX_MODEL_LEN` (default 16384), `AI_TOOL_PARSER` (default `qwen3_coder`; empty for Qwen1.5), `AI_API_KEY` (set it — the API is bound 0.0.0.0), `AI_EXTRA_ARGS`.
+Default model: `/srv/ai/models/Qwen3.6-27B-GPTQ-Int4` (served as `qwen3.6-27b-gptq-int4`) — single-vLLM on 113, LXC 111 stays stopped. Tune `/etc/vllm.env`: `AI_GPU_MEM_UTIL` (default 0.95), `AI_MAX_MODEL_LEN` (default 32768), `AI_TOOL_PARSER` (default `qwen3_coder`; empty for Qwen1.5), `AI_API_KEY` (set it — the API is bound 0.0.0.0), `AI_EXTRA_ARGS`.
 
 ## GPU co-tenancy with hlh-ai-engine-egpu (LXC 111)
 

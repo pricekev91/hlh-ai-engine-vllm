@@ -5,6 +5,15 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.9] - 2026-10-02
+
+### Changed — defaults now 32K ctx at 0.95 util (validated live)
+- Live 113 verified stable at `AI_MAX_MODEL_LEN=32768`, `AI_GPU_MEM_UTIL=0.95`:
+  health 200, `max_model_len 32768`, `Available KV cache memory: 6.23 GiB`
+  (`25,088` tokens), card `30,474 / 32,768 MiB`. Greenfield now reproduces it.
+- KV stays fp16 (`kv_cache_dtype=auto`; V100 `sm_70` has no FP8 path) around
+  GPTQ-Int4 weights; compute fp16 (bf16 falls back).
+
 ## [0.6.8] - 2026-10-02
 
 ### Changed — defaults now serve Qwen3.6-27B (single-vLLM 113)

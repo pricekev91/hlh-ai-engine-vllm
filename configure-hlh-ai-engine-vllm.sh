@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # configure-hlh-ai-engine-vllm.sh
-# Version: 0.6.8
+# Version: 0.6.9
 # Description: Native vLLM + native Open WebUI on Ubuntu 24.04 LXC (CUDA 12.8)
 #              Target: NVIDIA Tesla V100 GV100GL 32GB (Volta, cc 7.0) via OCuLink eGPU.
 #              No Docker — tok/s first, shared /srv/ai/models.
@@ -34,10 +34,10 @@ WEBUI_PORT="${WEBUI_PORT:-80}"
 MODEL_DIR="${MODEL_DIR:-/srv/ai/models}"
 DEFAULT_MODEL_PATH="${DEFAULT_MODEL_PATH:-${MODEL_DIR}/Qwen3.6-27B-GPTQ-Int4}"
 DEFAULT_MODEL_NAME="${DEFAULT_MODEL_NAME:-qwen3.6-27b-gptq-int4}"
-GPU_MEM_UTIL="${AI_GPU_MEM_UTIL:-0.85}"        # single-vLLM on 113, LXC 111 stays stopped:
-                                               # 27B GPTQ (~20GB) needs ~27GB at 16K context.
-                                               # For Qwen1.5-4B co-tenancy with 111, override 0.33 + empty parser.
-MAX_MODEL_LEN="${AI_MAX_MODEL_LEN:-16384}"
+GPU_MEM_UTIL="${AI_GPU_MEM_UTIL:-0.95}"        # single-vLLM 27B@32K on 113, LXC 111 stays stopped:
+                                               # 27B GPTQ (~19GB weights) + ~6GB fp16 KV at 32K needs ~30.5GB.
+                                               # For 16K use 0.85; for Qwen1.5-4B co-tenancy with 111, 0.33 + empty parser.
+MAX_MODEL_LEN="${AI_MAX_MODEL_LEN:-32768}"
 TOOL_PARSER="${AI_TOOL_PARSER:-qwen3_coder}"   # qwen3_coder for Qwen3.6-27B/35B-A3B; "" for Qwen1.5
 ENABLE_ROOT_PASSWORD_SSH="${ENABLE_ROOT_PASSWORD_SSH:-1}"
 
