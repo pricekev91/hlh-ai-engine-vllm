@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # configure-hlh-ai-engine-vllm.sh
-# Version: 0.6.6
+# Version: 0.6.8
 # Description: Native vLLM + native Open WebUI on Ubuntu 24.04 LXC (CUDA 12.8)
 #              Target: NVIDIA Tesla V100 GV100GL 32GB (Volta, cc 7.0) via OCuLink eGPU.
 #              No Docker — tok/s first, shared /srv/ai/models.
@@ -32,14 +32,13 @@ WEBUI_VENV_DIR="${WEBUI_VENV_DIR:-/opt/open-webui-venv}"
 AI_PORT="${AI_PORT:-8000}"
 WEBUI_PORT="${WEBUI_PORT:-80}"
 MODEL_DIR="${MODEL_DIR:-/srv/ai/models}"
-DEFAULT_MODEL_PATH="${DEFAULT_MODEL_PATH:-${MODEL_DIR}/Qwen1.5-4B-Chat-GPTQ-Int4}"
-DEFAULT_MODEL_NAME="${DEFAULT_MODEL_NAME:-qwen1.5-4b-chat-gptq-int4}"
-GPU_MEM_UTIL="${AI_GPU_MEM_UTIL:-0.33}"        # 0.33 of 32GB HBM2 (~11GB): co-tenancy default —
-                                               # V100 is shared with LXC 111 (llama.cpp, ~20GB).
-                                               # 0.30 is TOO SMALL: 4B GPTQ at 16K context needs 6.25GiB KV
-                                               # cache but 0.30 only leaves 5.84GiB after weights (vLLM FATAL).
-                                               # Raise to 0.85 (stop 111 first) for big models like 35B-A3B.
+DEFAULT_MODEL_PATH="${DEFAULT_MODEL_PATH:-${MODEL_DIR}/Qwen3.6-27B-GPTQ-Int4}"
+DEFAULT_MODEL_NAME="${DEFAULT_MODEL_NAME:-qwen3.6-27b-gptq-int4}"
+GPU_MEM_UTIL="${AI_GPU_MEM_UTIL:-0.85}"        # single-vLLM on 113, LXC 111 stays stopped:
+                                               # 27B GPTQ (~20GB) needs ~27GB at 16K context.
+                                               # For Qwen1.5-4B co-tenancy with 111, override 0.33 + empty parser.
 MAX_MODEL_LEN="${AI_MAX_MODEL_LEN:-16384}"
+TOOL_PARSER="${AI_TOOL_PARSER:-qwen3_coder}"   # qwen3_coder for Qwen3.6-27B/35B-A3B; "" for Qwen1.5
 ENABLE_ROOT_PASSWORD_SSH="${ENABLE_ROOT_PASSWORD_SSH:-1}"
 
 VLLM_SERVICE="/etc/systemd/system/vllm.service"
@@ -391,8 +390,11 @@ AI_SERVED_NAME=${DEFAULT_MODEL_NAME}
 AI_GPU_MEM_UTIL=${GPU_MEM_UTIL}
 AI_MAX_MODEL_LEN=${MAX_MODEL_LEN}
 # Tool-call parser for auto tool choice (empty = tool choice disabled).
-# Qwen1.5-4B-Chat: leave empty. Qwen3.6-35B-A3B: AI_TOOL_PARSER=qwen3_coder
-AI_TOOL_PARSER=""
+# Qwen1.5-4B-Chat: leave empty. Qwen3.6-27B / Qwen3.6-35B-A3B: AI_TOOL_PARSER=qwen3_coder
+# Single-vLLM design (vmid 113): WebUI sends plain chat (no tools), external
+# harness sends tools to :8000/v1. With a Qwen3 model + qwen3_coder both work;
+# with Qwen1.5 any parser crashes even on "hello" (no <tool_call> tokens).
+AI_TOOL_PARSER=${TOOL_PARSER}
 # Prometheus metrics always exposed at http://${AI_PORT}/metrics (prometheus_client, no flag needed)
 # Optional: require this bearer token on the API (recommended, host is 0.0.0.0)
 AI_API_KEY=""
@@ -407,8 +409,9 @@ VLLM_LOGGING_LEVEL=INFO
 # AI_GPU_MEM_UTIL=0.33 (~11GB) is the co-tenancy default: it fits the 4B GPTQ
 # model (3GB weights + 6.25GiB KV at 16K context) alongside 111's ~20GB
 # llama.cpp load. 0.30 is too small (KV cache shortfall -> vLLM FATAL at
-# startup). To serve a bigger model (e.g. Qwen3.6-35B-A3B-GPTQ-Int4), stop 111
-# first and raise AI_GPU_MEM_UTIL to 0.85 (set AI_TOOL_PARSER=qwen3_coder for it).
+# startup). To serve a bigger model (e.g. Qwen3.6-27B-GPTQ-Int4 ~20GB or
+# Qwen3.6-35B-A3B-GPTQ-Int4), stop 111 first and raise AI_GPU_MEM_UTIL to 0.85
+# (set AI_TOOL_PARSER=qwen3_coder for Qwen3 models; leave empty for Qwen1.5).
 EOF
 chmod 600 "${ENV_FILE}"
 
@@ -549,9 +552,31 @@ DEFAULT_NAME="$(basename "${NEW_MODEL}" | tr '[:upper:]' '[:lower:]')"
 read -rp "Served name [${DEFAULT_NAME}]: " SERVED
 SERVED="${SERVED:-${DEFAULT_NAME}}"
 
+# Smart defaults: Qwen3 (27B / 35B-A3B) needs qwen3_coder + 0.85 util (111 stopped);
+# Qwen1.5-4B needs empty parser + 0.33 util (co-tenancy). Wrong parser on Qwen1.5
+# crashes even on "hello": "Qwen3 XML Tool parser could not locate tool call
+# start/end tokens in the tokenizer!" (no <tool_call> in its vocab).
+CUR_PARSER="$(grep '^AI_TOOL_PARSER=' "$ENV_FILE" | cut -d= -f2)"
+CUR_UTIL="$(grep '^AI_GPU_MEM_UTIL=' "$ENV_FILE" | cut -d= -f2)"
+if [[ "${NEW_MODEL}" =~ [Qq]wen3.*(27[Bb]|35[Bb].*[Aa]3[Bb]) ]]; then
+  DEF_PARSER="qwen3_coder"; DEF_UTIL="0.85"
+else
+  DEF_PARSER=""; DEF_UTIL="${CUR_UTIL}"
+fi
+read -rp "Tool parser (empty=disabled, qwen3_coder for Qwen3) [${DEF_PARSER:-empty}]: " NEW_PARSER
+NEW_PARSER="${NEW_PARSER:-${DEF_PARSER}}"
+read -rp "GPU mem util [${DEF_UTIL}]: " NEW_UTIL
+NEW_UTIL="${NEW_UTIL:-${DEF_UTIL}}"
+
 sed -i -E "s|^AI_MODEL_PATH=.*|AI_MODEL_PATH=${NEW_MODEL}|" "$ENV_FILE"
 sed -i -E "s|^AI_SERVED_NAME=.*|AI_SERVED_NAME=${SERVED}|" "$ENV_FILE"
-grep -E '^(AI_MODEL_PATH|AI_SERVED_NAME)=' "$ENV_FILE"
+if grep -q '^AI_TOOL_PARSER=' "$ENV_FILE"; then
+  sed -i -E "s|^AI_TOOL_PARSER=.*|AI_TOOL_PARSER=${NEW_PARSER}|" "$ENV_FILE"
+else
+  echo "AI_TOOL_PARSER=${NEW_PARSER}" >> "$ENV_FILE"
+fi
+sed -i -E "s|^AI_GPU_MEM_UTIL=.*|AI_GPU_MEM_UTIL=${NEW_UTIL}|" "$ENV_FILE"
+grep -E '^(AI_MODEL_PATH|AI_SERVED_NAME|AI_TOOL_PARSER|AI_GPU_MEM_UTIL)=' "$ENV_FILE"
 
 systemctl restart vllm
 echo "Waiting for vLLM health on :${PORT} (model load can take minutes)..."

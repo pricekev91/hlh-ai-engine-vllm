@@ -5,6 +5,46 @@ All notable changes to this repository are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.8] - 2026-10-02
+
+### Changed — defaults now serve Qwen3.6-27B (single-vLLM 113)
+- Greenfield (`--destroy`) and `--update` without overrides previously reverted
+  live 113 to `Qwen1.5-4B-Chat-GPTQ-Int4 / 0.33 / empty parser` — useless for
+  the 27B target and the exact revert hit during validation.
+- Defaults are now `Qwen3.6-27B-GPTQ-Int4` as `qwen3.6-27b-gptq-int4` with
+  `AI_GPU_MEM_UTIL=0.85`, `AI_TOOL_PARSER=qwen3_coder` (111 stays stopped).
+  For 4B co-tenancy override `0.33` + empty parser.
+
+## [0.6.7] - 2026-10-02
+
+### Fixed — `Qwen3 XML Tool parser could not locate tool call start/end tokens` on plain chat
+- **Root cause**: `vllm-run.sh` on LXC 113 hardcoded `--enable-auto-tool-choice
+  --tool-call-parser qwen3_coder` while serving `Qwen1.5-4B-Chat-GPTQ-Int4`.
+  `Qwen3CoderToolParser` requires `<tool_call>` / `</tool_call>` in the
+  tokenizer vocab; Qwen1.5 has none (verified: `get_vocab()` lacks both),
+  so every OpenWebUI `POST /v1/chat/completions` with `tools` (even `hello`)
+  raised `RuntimeError` in `preprocess_chat`. Qwen3.6-27B/35B-A3B DO have
+  `248058/248059` and init fine.
+- **Live fix (vmid 113, single-vLLM)**: `/etc/vllm.env` now serves
+  `/srv/ai/models/Qwen3.6-27B-GPTQ-Int4` as `qwen3.6-27b-gptq-int4` with
+  `AI_GPU_MEM_UTIL=0.85`, `AI_MAX_MODEL_LEN=16384`, `AI_TOOL_PARSER=qwen3_coder`
+  (V100-safe: `--enforce-eager`, fp16 fallback, `TRITON_ATTN`). WebUI sends
+  plain chat (no tools); external harness sends tools to `:8000/v1` — both
+  work on the same vLLM because the model has the tokens. LXC 111 stays
+  stopped (27B needs ~27 GB at 16K).
+
+### Changed — tool parser + model are env-overridable, switch helper is parser-aware
+- `configure`: new `AI_TOOL_PARSER` input (`TOOL_PARSER`, default empty) is
+  written to `/etc/vllm.env` instead of hardcoded `""`; comments cover
+  Qwen1.5 (empty) vs Qwen3.6-27B/35B-A3B (`qwen3_coder`).
+- `deploy`: forwards `DEFAULT_MODEL_PATH` / `DEFAULT_MODEL_NAME` /
+  `AI_GPU_MEM_UTIL` / `AI_TOOL_PARSER` / `AI_MAX_MODEL_LEN` to configure
+  (replaces dead `VLLM_DEFAULT_MODEL` forward); documents 27B `--update`
+  example. Version `v0.6.7`.
+- `vllm-switch-model.sh`: prompts for tool parser + GPU util with smart
+  defaults (`qwen3_coder` + `0.85` for Qwen3 27B/35B-A3B, empty + current
+  util otherwise) so switching models no longer leaves a crashing parser.
+
 ## [0.6.6] - 2026-09-25
 
 ### Changed — co-tenancy default raised to `AI_GPU_MEM_UTIL=0.33`

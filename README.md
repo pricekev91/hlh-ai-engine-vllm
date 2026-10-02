@@ -81,7 +81,7 @@ ssh root@192.168.1.13 'cat /etc/vllm.env'
 ssh root@192.168.1.13 'cat /etc/open-webui.env'
 ```
 
-Default model: `/srv/ai/models/Qwen1.5-4B-Chat-GPTQ-Int4` (served as `qwen1.5-4b-chat-gptq-int4`) — the small-model co-tenancy default (see below). Tune `/etc/vllm.env`: `AI_GPU_MEM_UTIL` (default 0.33), `AI_MAX_MODEL_LEN` (default 16384), `AI_TOOL_PARSER` (default empty; `qwen3_coder` for the 35B model), `AI_API_KEY` (set it — the API is bound 0.0.0.0), `AI_EXTRA_ARGS`.
+Default model: `/srv/ai/models/Qwen3.6-27B-GPTQ-Int4` (served as `qwen3.6-27b-gptq-int4`) — single-vLLM on 113, LXC 111 stays stopped. Tune `/etc/vllm.env`: `AI_GPU_MEM_UTIL` (default 0.85), `AI_MAX_MODEL_LEN` (default 16384), `AI_TOOL_PARSER` (default `qwen3_coder`; empty for Qwen1.5), `AI_API_KEY` (set it — the API is bound 0.0.0.0), `AI_EXTRA_ARGS`.
 
 ## GPU co-tenancy with hlh-ai-engine-egpu (LXC 111)
 
@@ -112,6 +112,7 @@ The same OCuLink V100 (`c5:00.0`) is passed through to **both** LXCs. Both engin
 - **`torch.cuda.is_available() == False`** → `/dev/nvidia0`/`/dev/nvidiactl`/`/dev/nvidia-uvm` not bound; redeploy (passthrough block) and restart LXC.
 - **`no kernel image is available for execution on the device`** → you're running a cu13/sm_75+ build; reinstall `vllm==0.19.1` (cu128).
 - **VRAM OOM while LXC 111 is running** → shared card; stop/resize the sibling engine or lower `AI_GPU_MEM_UTIL`.
+- **`RuntimeError: Qwen3 XML Tool parser could not locate tool call start/end tokens` on plain `hello`** → vLLM runs `--tool-call-parser qwen3_coder` on a model whose tokenizer lacks `<tool_call>`/`</tool_call>` (Qwen1.5-4B). Qwen3.6-27B/35B-A3B have them (`248058/248059`), Qwen1.5 does not. Fix: `AI_TOOL_PARSER=""` for Qwen1.5, `qwen3_coder` for Qwen3; single-vLLM 113 serves Qwen3 so WebUI plain chat + harness tools both work. `vllm-switch-model.sh` now sets parser+util together.
 - **Host driver missing / wrong branch** → `cd ~/git/hlh-ai-engine-egpu && ./deploy-hlh-ai-engine-egpu.sh` (owns the R580 580.65.06 install on 6.14 LTS kernel).
 
 ## Repo layout

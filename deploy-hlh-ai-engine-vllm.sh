@@ -28,7 +28,7 @@ This is the direct Proxmox bootstrap path (pure bash, 2-file KISS):
 	4) Start container
 	5) Push/run configure-hlh-ai-engine-vllm.sh inside LXC (native vLLM 0.19.1 cu128
 	   + native Open WebUI via uv, no docker)
-	   vLLM serving /srv/ai/models/Qwen1.5-4B-Chat-GPTQ-Int4 on :8000, WebUI on :80
+	   vLLM serving /srv/ai/models/Qwen3.6-27B-GPTQ-Int4 on :8000, WebUI on :80
 
 If LXC 113 already exists, interactive prompt offers:
   y = destroy & recreate from scratch (full rebuild, ~10-20 min)
@@ -47,8 +47,8 @@ Env overrides (forwarded into LXC bootstrap):
   NVIDIA_DRIVER_VERSION  Host driver to expect (default 580.65.06, R580 last for Volta)
   KEEP_111=1           Never stop LXC 111 (hlh-ai-engine-egpu) on the shared V100.
                        Default: deploy stops 111's ai-engine only if its VRAM leaves
-                       less than vLLM's budget free (default util 0.33 = ~11GB, so
-                       111's ~20GB llama.cpp load coexists with the 4B default model).
+                       less than vLLM's budget free (default util 0.85 = ~27GB for 27B,
+                       111 stays stopped; override 0.33 to co-host the 4B model).
 
 Examples:
   ./deploy-hlh-ai-engine-vllm.sh                    # full deploy
@@ -71,13 +71,19 @@ LXC_CORES="12"
 LXC_IP_CONFIG="192.168.1.13/24"
 LXC_GATEWAY="192.168.1.1"
 VLLM_MODEL_DIR="/srv/ai/models"
-VLLM_DEFAULT_MODEL="Qwen1.5-4B-Chat-GPTQ-Int4"
+VLLM_DEFAULT_MODEL="Qwen3.6-27B-GPTQ-Int4"
 WEBUI_PORT="80"
 
 # --- PINNED STACK (V100 Volta cc 7.0 — see SBOM header) ---
 VLLM_VERSION="${VLLM_VERSION:-0.19.1}"
 NVIDIA_DRIVER_VERSION="${NVIDIA_DRIVER_VERSION:-580.65.06}"
-GPU_MEM_UTIL="${AI_GPU_MEM_UTIL:-0.33}"        # co-tenancy default (see configure script)
+GPU_MEM_UTIL="${AI_GPU_MEM_UTIL:-0.85}"        # single-vLLM 27B default (111 stopped); override 0.33 for 4B co-tenancy
+# Model + tool-parser overrides (forwarded to configure; configure writes /etc/vllm.env).
+# Defaults now serve Qwen3.6-27B (single-vLLM 113, harness tools via :8000/v1).
+DEFAULT_MODEL_PATH="${DEFAULT_MODEL_PATH:-${VLLM_MODEL_DIR}/Qwen3.6-27B-GPTQ-Int4}"
+DEFAULT_MODEL_NAME="${DEFAULT_MODEL_NAME:-qwen3.6-27b-gptq-int4}"
+TOOL_PARSER="${AI_TOOL_PARSER:-qwen3_coder}"
+MAX_MODEL_LEN="${AI_MAX_MODEL_LEN:-16384}"
 
 NONINTERACTIVE_MODE=""
 SKIP_HOST_DRIVER=false
@@ -114,7 +120,7 @@ if [[ "${VLLM_VERSION}" != "0.19.1" ]]; then
 	echo "  will not run those builds. Only override with a known sm_70 build." >&2
 fi
 
-echo "=== hlh-ai-engine-vllm deploy v0.6.6 ==="
+echo "=== hlh-ai-engine-vllm deploy v0.6.8 ==="
 echo "  LXC          : ${LXC_ID} (${LXC_NAME}) ${LXC_IP_CONFIG} on ${POOL}"
 echo "  vLLM         : ${VLLM_VERSION} (PyPI CUDA build — last stable with cu128/sm_70)"
 echo "  torch        : 2.10.0+cu128 (pulled by vLLM; bundles CUDA 12.8 runtime)"
@@ -294,7 +300,7 @@ if [[ "${UPDATE_IN_PLACE}" == "true" ]]; then
 	echo "  Forwarding VLLM_VERSION=${VLLM_VERSION} NVIDIA_DRIVER_VERSION=${NVIDIA_DRIVER_VERSION} -> LXC"
 	pct exec "${LXC_ID}" -- mkdir -p /root/ai-engine-bootstrap
 	pct push "${LXC_ID}" "$BOOTSTRAP_SCRIPT" /root/ai-engine-bootstrap/configure-hlh-ai-engine-vllm.sh --perms 0755
-	pct exec "${LXC_ID}" -- env VLLM_VERSION="${VLLM_VERSION}" NVIDIA_DRIVER_VERSION="${NVIDIA_DRIVER_VERSION}" VLLM_DEFAULT_MODEL="${VLLM_DEFAULT_MODEL}" AI_GPU_MEM_UTIL="${GPU_MEM_UTIL}" bash /root/ai-engine-bootstrap/configure-hlh-ai-engine-vllm.sh
+	pct exec "${LXC_ID}" -- env VLLM_VERSION="${VLLM_VERSION}" NVIDIA_DRIVER_VERSION="${NVIDIA_DRIVER_VERSION}" DEFAULT_MODEL_PATH="${DEFAULT_MODEL_PATH}" DEFAULT_MODEL_NAME="${DEFAULT_MODEL_NAME}" AI_GPU_MEM_UTIL="${GPU_MEM_UTIL}" AI_TOOL_PARSER="${TOOL_PARSER}" AI_MAX_MODEL_LEN="${MAX_MODEL_LEN}" bash /root/ai-engine-bootstrap/configure-hlh-ai-engine-vllm.sh
 	echo "[6/6] Update complete. LXC ${LXC_ID} (${LXC_NAME}) patched in place (no recreate)."
 	echo "Model storage: ${MODEL_HOST_DIR} (host) <-> ${MODEL_LXC_DIR} (container) on ${POOL}"
 	echo "Backend      : vLLM ${VLLM_VERSION} CUDA 12.8 (V100 GV100 32GB sm_70, native via uv, no docker)"
@@ -388,7 +394,7 @@ echo "[5/6] Running in-container bootstrap (native vLLM CUDA + WebUI)..."
 echo "  Forwarding VLLM_VERSION=${VLLM_VERSION} NVIDIA_DRIVER_VERSION=${NVIDIA_DRIVER_VERSION} -> LXC"
 pct exec "${LXC_ID}" -- mkdir -p /root/ai-engine-bootstrap
 pct push "${LXC_ID}" "$BOOTSTRAP_SCRIPT" /root/ai-engine-bootstrap/configure-hlh-ai-engine-vllm.sh --perms 0755
-pct exec "${LXC_ID}" -- env VLLM_VERSION="${VLLM_VERSION}" NVIDIA_DRIVER_VERSION="${NVIDIA_DRIVER_VERSION}" VLLM_DEFAULT_MODEL="${VLLM_DEFAULT_MODEL}" AI_GPU_MEM_UTIL="${GPU_MEM_UTIL}" bash /root/ai-engine-bootstrap/configure-hlh-ai-engine-vllm.sh
+pct exec "${LXC_ID}" -- env VLLM_VERSION="${VLLM_VERSION}" NVIDIA_DRIVER_VERSION="${NVIDIA_DRIVER_VERSION}" DEFAULT_MODEL_PATH="${DEFAULT_MODEL_PATH}" DEFAULT_MODEL_NAME="${DEFAULT_MODEL_NAME}" AI_GPU_MEM_UTIL="${GPU_MEM_UTIL}" AI_TOOL_PARSER="${TOOL_PARSER}" AI_MAX_MODEL_LEN="${MAX_MODEL_LEN}" bash /root/ai-engine-bootstrap/configure-hlh-ai-engine-vllm.sh
 
 echo "[5/6] Verifying bootstrap (fail-fast instead of silent port-8000 refused)..."
 pct exec "${LXC_ID}" -- systemctl is-active vllm >/dev/null 2>&1 || { echo "ERROR: vllm.service not active after bootstrap — check: pct exec ${LXC_ID} -- journalctl -u vllm -n 100" >&2; exit 1; }
